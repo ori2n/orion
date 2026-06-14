@@ -46,6 +46,14 @@ export interface WorkoutLog {
   rpe: number;                    // perceived effort 1-10
   notes: string;
   created_at: string;
+  // Legacy fields (from workout_logs table) — kept for backward compat
+  set1_weight?: number | null;
+  set1_reps?: number | null;
+  set1_failure?: boolean;
+  set2_weight?: number | null;
+  set2_reps?: number | null;
+  set2_failure?: boolean;
+  warmup?: string;
 }
 
 export interface PhysiqueLog {
@@ -62,6 +70,11 @@ export interface NutritionLog {
   calories: number;
   protein_g: number;
   created_at: string;
+  // Legacy fields (from legacy nutrition_logs table) — kept for backward compat
+  water_ml?: number;
+  caffeine_mg?: number;
+  caffeine_time?: string | null;
+  creatine_taken?: boolean;
 }
 
 /** Recovery state: energy, stress, soreness */

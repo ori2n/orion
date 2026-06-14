@@ -356,8 +356,8 @@ export default function NutritionAnalytics({
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
     );
 
-    const waterVals = sorted.map((l) => l.water_ml);
-    const caffeineVals = sorted.filter((l) => l.caffeine_mg > 0);
+    const waterVals = sorted.map((l) => l.water_ml ?? 0);
+    const caffeineVals = sorted.filter((l) => (l.caffeine_mg ?? 0) > 0);
 
     // Aggregate water by date
     const waterByDate = new Map<string, { water: number; date: Date }>();
@@ -365,9 +365,9 @@ export default function NutritionAnalytics({
       const dateStr = getDateStr(log.created_at);
       const existing = waterByDate.get(dateStr);
       if (existing) {
-        existing.water += log.water_ml;
+        existing.water += (log.water_ml ?? 0);
       } else {
-        waterByDate.set(dateStr, { water: log.water_ml, date: new Date(log.created_at) });
+        waterByDate.set(dateStr, { water: log.water_ml ?? 0, date: new Date(log.created_at) });
       }
     }
 
@@ -377,7 +377,7 @@ export default function NutritionAnalytics({
 
     const avgWater = avg(waterVals);
     const avgCaff = caffeineVals.length > 0
-      ? avg(caffeineVals.map((l) => l.caffeine_mg))
+      ? avg(caffeineVals.map((l) => l.caffeine_mg ?? 0))
       : 0;
 
     // Check if creatine was logged today
@@ -561,7 +561,7 @@ export default function NutritionAnalytics({
                     <Sparkline data={stats.waterTrend} hue={NUTRITION_HUE} className="mt-2" />
                   </div>
                   {stats.latest && (
-                    <HydrationGauge waterMl={stats.latest.water_ml} created_at={stats.latest.created_at} />
+                    <HydrationGauge waterMl={stats.latest.water_ml ?? 0} created_at={stats.latest.created_at} />
                   )}
                 </div>
 
@@ -650,7 +650,7 @@ export default function NutritionAnalytics({
                     {stats.latest?.caffeine_mg ?? 0}
                     <span className="text-sm text-zinc-500">mg</span>
                   </p>
-                  {stats.latest?.caffeine_time && stats.latest.caffeine_mg > 0 && (
+                  {stats.latest?.caffeine_time && (stats.latest.caffeine_mg ?? 0) > 0 && (
                     <p className="mt-1 text-[8px] tracking-wider text-zinc-600">
                       logged at {fmtTime(stats.latest.caffeine_time)}
                     </p>
@@ -676,8 +676,8 @@ export default function NutritionAnalytics({
                     {[...stats.caffeineLogs].reverse().map((log, i) => (
                       <CaffeineArc
                         key={log.id || i}
-                        mg={log.caffeine_mg}
-                        time={log.caffeine_time}
+                        mg={log.caffeine_mg ?? 0}
+                        time={log.caffeine_time ?? null}
                       />
                     ))}
                   </div>

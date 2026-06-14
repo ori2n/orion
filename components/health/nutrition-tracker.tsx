@@ -53,6 +53,8 @@ export default function NutritionTracker() {
     setSuccess(null);
     try {
       const result = await insertNutritionLog({
+        calories: 0,
+        protein_g: 0,
         water_ml: waterMl,
         caffeine_mg: caffeineMg,
         caffeine_time: caffeineMg > 0 ? combineToday(caffeineTime) : null,
@@ -106,7 +108,7 @@ export default function NutritionTracker() {
             <span className="text-zinc-500 dark:text-zinc-400">
               💧 {latest.water_ml}ml
             </span>
-            {latest.caffeine_mg > 0 && (
+            {(latest.caffeine_mg ?? 0) > 0 && (
               <span className="text-zinc-500 dark:text-zinc-400">
                 ☕ {latest.caffeine_mg}mg
               </span>

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getWorkoutLogs, insertWorkoutLog } from '@/lib/health/storage';
 import { notifyHealthDataSaved } from '@/lib/health/events';
-import type { WorkoutLog } from '@/lib/health/storage';
+import type { LegacyWorkoutLog } from '@/lib/health/storage';
 
 type WorkoutType = 'upper' | 'lower' | 'push' | 'pull' | 'legs' | 'full';
 
@@ -34,7 +34,7 @@ function formatDate(iso: string): string {
 }
 
 export default function GymTracker() {
-  const [logs, setLogs] = useState<WorkoutLog[]>([]);
+  const [logs, setLogs] = useState<LegacyWorkoutLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -117,7 +117,7 @@ export default function GymTracker() {
   }
 
   // Group logs by date
-  const grouped: Record<string, WorkoutLog[]> = {};
+  const grouped: Record<string, LegacyWorkoutLog[]> = {};
   for (const log of logs) {
     const key = new Date(log.created_at).toDateString();
     if (!grouped[key]) grouped[key] = [];
