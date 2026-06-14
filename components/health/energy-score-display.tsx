@@ -26,30 +26,24 @@ function scoreHue(score: number): number {
 
 const BREAKDOWN_MAX: Record<keyof EnergyScoreBreakdown, number> = {
   total: 100,
-  sleep: 30,
-  activity: 15,
-  hydration: 15,
-  caffeine: 10,
-  nutrition: 10,
-  manual: 20,
+  sleep: 35,
+  training: 25,
+  nutrition: 15,
+  recovery: 25,
 };
 
 const BREAKDOWN_LABELS: Record<string, string> = {
   sleep: 'SLEEP',
-  activity: 'ACTIVITY',
-  hydration: 'HYDRATION',
-  caffeine: 'CAFFEINE',
+  training: 'TRAINING',
   nutrition: 'NUTRITION',
-  manual: 'STATE',
+  recovery: 'RECOVERY',
 };
 
 const BREAKDOWN_ICONS: Record<string, string> = {
   sleep: '🌙',
-  activity: '🏃',
-  hydration: '💧',
-  caffeine: '☕',
+  training: '🏋️',
   nutrition: '🍽️',
-  manual: '📊',
+  recovery: '💪',
 };
 
 /** Glowing neon energy ring – the centerpiece of the Jarvis dashboard */
