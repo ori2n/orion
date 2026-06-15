@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import AuthButton from '@/components/auth-button';
@@ -30,30 +31,30 @@ export default function RootLayout({
     >
       <body className="h-full flex flex-col">
         <nav className="flex items-center gap-6 border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
-          <a
+          <Link
             href="/"
             className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
             Home
-          </a>
-          <a
+          </Link>
+          <Link
             href="/actions"
             className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
             Habits
-          </a>
-          <a
+          </Link>
+          <Link
             href="/health"
             className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
             Health
-          </a>
-          <a
+          </Link>
+          <Link
             href="/finance"
             className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
             Finance
-          </a>
+          </Link>
           <div className="ml-auto flex items-center gap-4">
             <AuthButton />
           </div>

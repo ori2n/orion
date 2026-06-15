@@ -38,11 +38,6 @@ type Tab = 'habits' | 'todo';
 
 // ─── Section helpers ───────────────────────────────────────────────
 
-interface SectionDef {
-  name: string;
-  emoji: string;
-}
-
 const DEFAULT_EMOJIS: Record<string, string> = {
   Fitness: '🏋️', Health: '💚', Studies: '📚',
   Productivity: '⚡', Mindset: '🧠',
@@ -837,7 +832,6 @@ function SectionContainer({
   const holdArmed = useRef(false);       // true after hold threshold is reached
   const holdTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const holdStartRef = useRef(0);
-  const contentRef = useRef<HTMLDivElement>(null);
   const HOLD_DURATION_MS = 400;
 
   function clearHoldTimer() {
@@ -930,7 +924,6 @@ function SectionContainer({
   }
 
   const isSwipingRight = swipeOffset > 0;
-  const isHolding = holdProgress > 0 && holdProgress < 1;
   const deleteReveal = Math.min(swipeOffset / 120, 1); // 0 → 1 as swipe progresses
 
   return (
@@ -1000,7 +993,7 @@ function SectionContainer({
           className={`relative flex cursor-pointer items-center justify-between border-b border-zinc-200 px-4 py-3 transition-colors duration-200 dark:border-zinc-700 ${
             isSectionDragged ? 'opacity-50' : ''
           } ${isSwipingRight ? 'cursor-grabbing touch-pan-y' : ''}`}
-          onClick={(e) => {
+          onClick={() => {
             if (holdArmed.current || isSwiping.current || swipeOffset > 0 || swipedRef.current) {
               swipedRef.current = false;
               return;

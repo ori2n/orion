@@ -359,7 +359,7 @@ export default function AccountsTab({ accounts, transactions, onRefresh }: Accou
               {/* Birth date — required for JISA */}
               {newType === 'isa' && newIsJisa && (
                 <div className="rounded border border-zinc-700/30 bg-zinc-800/30 p-2">
-                  <label className="mb-1 block text-[9px] text-zinc-500">CHILD'S DATE OF BIRTH</label>
+                  <label className="mb-1 block text-[9px] text-zinc-500">CHILD&apos;S DATE OF BIRTH</label>
                   <input
                     type="date"
                     value={newBirthDate}
