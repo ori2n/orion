@@ -43,18 +43,7 @@ export default function RootLayout({
           >
             Habits
           </Link>
-          <Link
-            href="/health"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Health
-          </Link>
-          <Link
-            href="/finance"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Finance
-          </Link>
+
           <div className="ml-auto flex items-center gap-4">
             <AuthButton />
           </div>

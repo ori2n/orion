@@ -7,8 +7,6 @@ import { supabase } from './supabase';
 export const EventTypes = {
   /** Habit completion toggle */
   HABIT_LOG: 'habit_log',
-  /** Future: finance tracking */
-  FINANCE_LOG: 'log_finance',
   /** Future: journal entries */
   JOURNAL_ENTRY: 'journal_entry',
 } as const;

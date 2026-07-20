@@ -34,6 +34,81 @@ function today(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * Helper: determine whether an error message indicates the Supabase
+ * "JWT issued at future" clock-skew problem.
+ *
+ * Root cause: when the middleware (`proxy.ts`) freshly refreshes a
+ * session via GoTrue, the browser immediately receives the new JWT.
+ * Because GoTrue (Auth server) and PostgREST (Database server) sit
+ * on different nodes with slightly drifting clocks, the just-issued
+ * token's `iat` can still be "in the future" relative to PostgREST's
+ * clock at the moment the very first database query lands. A short
+ * delay is enough for the database clock to catch up — the token
+ * itself is perfectly valid.
+ */
+function isFutureIatError(message: string | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  // Match across known phrasings ("JWT issued at future", "in the future",
+  // "future date", etc.) plus Postgres's "i_at" form, defensively.
+  return (
+    m.includes('jwt issued at future') ||
+    m.includes('issued at future') ||
+    m.includes('token is issued in the future')
+  );
+}
+
+/** Retry delay (ms) after a "future iat" rejection. Tuned to outlast the
+ *  typical Auth → DB clock drift observed on Supabase hosted infra. */
+const FUTURE_IAT_RETRY_DELAY_MS = 750;
+/** Max number of retry attempts before giving up. */
+const FUTURE_IAT_MAX_RETRIES = 3;
+
+/**
+ * Retry a Supabase query up to FUTURE_IAT_MAX_RETRIES times if it fails
+ * with the transient "JWT issued at future" clock-skew error.
+ *
+ * Hoisted to module scope (rather than declared inside `loadData`) so it
+ * is allocated once. Accepts both `PromiseLike` and `Promise` returns
+ * because Supabase query chains (`supabase.from(...).select(...).order(...)`)
+ * resolve to a `PostgrestFilterBuilder` which is thenable but not a
+ * full Promise — so we accept `PromiseLike<R> | Promise<R>`. Any other
+ * error is returned unchanged so the existing UI error path still fires.
+ */
+async function retryFutureIat<R extends { data: unknown; error: { message?: string } | null }>(
+  label: string,
+  run: () => PromiseLike<R> | Promise<R>,
+): Promise<R> {
+  let attempt = 0;
+  let result: R = await run();
+  while (
+    result.error &&
+    isFutureIatError(result.error.message) &&
+    attempt < FUTURE_IAT_MAX_RETRIES
+  ) {
+    if (attempt === 0) {
+      // Single warning per query per load — useful to confirm in DevTools
+      // that the upstream Supabase drift is real vs. some other error.
+      console.warn(`[habits] ${label} rejected with "JWT issued at future" — retrying once`);
+    }
+    attempt += 1;
+    await new Promise((r) => setTimeout(r, FUTURE_IAT_RETRY_DELAY_MS));
+    result = await run();
+  }
+  if (result.error && isFutureIatError(result.error.message)) {
+    console.warn(`[habits] ${label} retry exhausted on JWT clock-skew`);
+    return {
+      ...result,
+      error: {
+        ...(result.error as { message?: string }),
+        message: `${result.error.message ?? label} (clock-skew with auth server; auto-retry exhausted)`,
+      },
+    };
+  }
+  return result;
+}
+
 type Tab = 'habits' | 'todo';
 
 // ─── Section helpers ───────────────────────────────────────────────
@@ -121,7 +196,15 @@ export default function ActionsPage() {
     const uid = await getCurrentUserId();
     setUserId(uid);
 
-    // Fire queries in parallel
+    // Fire queries in parallel.
+    //
+    // IMPORTANT: The very first load right after the middleware freshly
+    // refreshed the session can race with PostgREST's clock on hosted
+    // Supabase infra — the database side rejects the brand-new JWT with
+    // "JWT issued at future" because its clock is fractionally behind
+    // GoTrue's. A short retry after the drift resolves the issue without
+    // any user-visible change. The retry is bounded so a real auth
+    // failure still surfaces promptly.
     const [tagsResult, habitsResult, completionsResult] = await Promise.all([
       supabase.from('tags').select('*').order('created_at'),
       supabase.from('habits').select('*').order('created_at'),
@@ -130,26 +213,41 @@ export default function ActionsPage() {
         : Promise.resolve({ data: [], error: null }),
     ]);
 
-    if (tagsResult.error) {
-      setError(`Failed to load tags: ${tagsResult.error.message}`);
+    // Re-run any query whose error is a "future iat" rejection. The retry
+    // helper handles only the transient clock-skew rejection — every other
+    // error falls through unchanged so the existing error UI still fires.
+    const fixedTagsResult = tagsResult.error && isFutureIatError(tagsResult.error.message)
+      ? await retryFutureIat('tags', () => supabase.from('tags').select('*').order('created_at'))
+      : tagsResult;
+    const fixedHabitsResult = habitsResult.error && isFutureIatError(habitsResult.error.message)
+      ? await retryFutureIat('habits', () => supabase.from('habits').select('*').order('created_at'))
+      : habitsResult;
+    const fixedCompletionsResult = completionsResult.error && isFutureIatError(completionsResult.error.message) && uid
+      ? await retryFutureIat('habit_completions', () =>
+          supabase.from('habit_completions').select('*').eq('user_id', uid).eq('completed_date', today()),
+        )
+      : completionsResult;
+
+    if (fixedTagsResult.error) {
+      setError(`Failed to load tags: ${fixedTagsResult.error.message}`);
       setLoading(false);
       return;
     }
-    if (habitsResult.error) {
-      setError(`Failed to load habits: ${habitsResult.error.message}`);
+    if (fixedHabitsResult.error) {
+      setError(`Failed to load habits: ${fixedHabitsResult.error.message}`);
       setLoading(false);
       return;
     }
-    if (completionsResult.error) {
-      setError(`Failed to load completions: ${completionsResult.error.message}`);
+    if (fixedCompletionsResult.error) {
+      setError(`Failed to load completions: ${fixedCompletionsResult.error.message}`);
       setLoading(false);
       return;
     }
 
-    const loadedTags = tagsResult.data ?? [];
+    const loadedTags = fixedTagsResult.data ?? [];
     setTags(loadedTags);
-    setHabits(habitsResult.data ?? []);
-    setCompletions(new Set((completionsResult.data ?? []).map((c: Completion) => c.habit_id)));
+    setHabits(fixedHabitsResult.data ?? []);
+    setCompletions(new Set((fixedCompletionsResult.data ?? []).map((c: Completion) => c.habit_id)));
 
     // Merge loaded tags into section order
     const tagNames = new Set(loadedTags.map((t: Tag) => t.name));
