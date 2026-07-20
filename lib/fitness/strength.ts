@@ -18,13 +18,40 @@ import type {
  *
  * Accuracy drops sharply beyond 10 reps, so we cap the input at 10
  * (sets with more reps return their actual weight as the estimate —
- * i.e. epley(weight, 10) which is `weight * 4/3`). Sets with no reps
- * return 0.
+ * i.e. epley(weight, 10) which is `weight * 4/3`). NULL reps return
+ * 0 — callers should use `effectiveReps(set.reps)` first to treat
+ * weight-only logs as 1 rep.
  */
-export function estimated1RM(weightKg: number, reps: number): number {
-  if (!Number.isFinite(weightKg) || weightKg <= 0 || !Number.isInteger(reps) || reps <= 0) return 0;
+export function estimated1RM(weightKg: number, reps: number | null): number {
+  if (!Number.isFinite(weightKg) || weightKg <= 0) return 0;
+  if (reps === null || !Number.isInteger(reps) || reps <= 0) return 0;
   const cappedReps = Math.min(reps, 10);
   return weightKg * (1 + cappedReps / 30);
+}
+
+/**
+ * Resolve the rep count to use for PR detection and Epley. After the
+ * workout-summary migration, `reps` can be NULL (user logged weight
+ * only). We treat that as 1 rep so a 100kg weight-only log still
+ * surfaces as a "1RM" PR candidate and the timeline still has a
+ * legible estimate.
+ *
+ * Exported because other modules (e.g. flashback) need the same
+ * NULL-tolerant resolution rule.
+ */
+export function effectiveReps(reps: number | null): number {
+  return reps ?? 1;
+}
+
+/**
+ * Resolve the working set count to use for volume + summary stats.
+ * Legacy rows pre-migration are NULL — we cannot distinguish "one
+ * heavy set" from "one of three identical sets" without a third
+ * reference, so we treat NULL as 1 (consistent with the backfill
+ * migration).
+ */
+function effectiveSetCount(count: number | null): number {
+  return count ?? 1;
 }
 
 /**
@@ -47,13 +74,19 @@ export function buildExerciseStats(
       timeline: [],
       pr_leaderboard: [],
       total_volume_kg: 0,
+      total_working_sets: 0,
       workouts_count: 0,
     };
   }
 
-  // Estimated 1RM per set.
+  // Estimated 1RM per set, plus pre-resolved effective reps and
+  // effective working-set count. NULL reps → 1 (so weight-only logs
+  // still surface as 1RM PR candidates). NULL working_sets_count → 1
+  // (consistent with the backfill migration).
   const withEst = exSets.map((s) => ({
     set: s,
+    reps: effectiveReps(s.reps),
+    sets: effectiveSetCount(s.working_sets_count),
     est: estimated1RM(s.weight_kg, s.reps),
     performed_at: workoutMap.get(s.workout_id)?.performed_at ?? s.created_at,
   }));
@@ -65,7 +98,9 @@ export function buildExerciseStats(
     if (!cur || x.est > cur.est) peakByWorkout.set(x.set.workout_id, x);
   }
 
-  // Chronological timeline (oldest → newest).
+  // Chronological timeline (oldest → newest). Each timeline point
+  // represents the peak (highest est 1RM) of one session — same shape
+  // as before; in the summary model the peak IS the row.
   const timeline = Array.from(peakByWorkout.values())
     .sort(
       (a, b) =>
@@ -75,7 +110,7 @@ export function buildExerciseStats(
       at: x.performed_at,
       estimated_1rm: Math.round(x.est * 100) / 100,
       weight_kg: x.set.weight_kg,
-      reps: x.set.reps,
+      reps: x.set.reps, // nullable — downstream PR detection treats NULL as 1
     }));
 
   // Best estimated 1RM (across all workouts).
@@ -84,35 +119,46 @@ export function buildExerciseStats(
     withEst[0],
   );
 
-  // Best actual 1RM = max weight at reps === 1.
-  const oneRepMaxes = exSets.filter((s) => s.reps === 1);
+  // Best actual 1RM = max weight where the user logged rep === 1.
+  // Weight-only logs (NULL reps) ARE counted here — they ARE a 1RM
+  // assertion from the user's perspective.
+  const oneRepMaxes = exSets.filter((s) => effectiveReps(s.reps) === 1);
   const actual1RM =
     oneRepMaxes.length === 0 ? null : Math.max(...oneRepMaxes.map((s) => s.weight_kg));
 
   // PR leaderboard:
-  //   Group sets by rep_count (1..10) → max weight per group → flatten,
-  //   sort by weight DESC. Top 3 = the user's best-ever top-tier PRs.
+  //   Group sets by EFFECTIVE rep count (NULL → 1) → max weight per
+  //   group → flatten, sort by weight DESC. Top 3 = the user's
+  //   best-ever top-tier PRs. Weight-only logs surface as 1-rep PRs.
   const byRep = new Map<number, WorkoutSet>();
   for (const s of exSets) {
-    const cur = byRep.get(s.reps);
-    if (!cur || s.weight_kg > cur.weight_kg) byRep.set(s.reps, s);
+    const er = effectiveReps(s.reps);
+    const cur = byRep.get(er);
+    if (!cur || s.weight_kg > cur.weight_kg) byRep.set(er, s);
   }
   const prRaw = Array.from(byRep.values()).sort((a, b) => b.weight_kg - a.weight_kg);
-  const prLeaderboard: PREntry[] = prRaw.slice(0, 3).map((s) => ({
-    exercise_id: exercise.id,
-    exercise_name: exercise.name,
-    weight_kg: s.weight_kg,
-    reps: s.reps,
-    estimated_1rm: estimated1RM(s.weight_kg, s.reps),
-    achieved_at:
-      workoutMap.get(s.workout_id)?.performed_at ?? s.created_at,
-    workout_id: s.workout_id,
-  }));
+  const prLeaderboard: PREntry[] = prRaw.slice(0, 3).map((s) => {
+    const er = effectiveReps(s.reps);
+    return {
+      exercise_id: exercise.id,
+      exercise_name: exercise.name,
+      weight_kg: s.weight_kg,
+      reps: er,
+      estimated_1rm: estimated1RM(s.weight_kg, er),
+      achieved_at:
+        workoutMap.get(s.workout_id)?.performed_at ?? s.created_at,
+      workout_id: s.workout_id,
+    };
+  });
 
-  const totalVolume = exSets.reduce(
-    (acc, s) => acc + s.weight_kg * s.reps,
+  // Volume: weight × effective reps × (working_sets_count ?? 1).
+  // Honest hypertrophy signal even when reps were skipped or
+  // working_sets_count is NULL on legacy rows.
+  const totalVolume = withEst.reduce(
+    (acc, x) => acc + x.set.weight_kg * x.reps * x.sets,
     0,
   );
+  const totalWorkingSets = withEst.reduce((acc, x) => acc + x.sets, 0);
   const workoutsCount = new Set(exSets.map((s) => s.workout_id)).size;
 
   return {
@@ -123,6 +169,7 @@ export function buildExerciseStats(
     timeline,
     pr_leaderboard: prLeaderboard,
     total_volume_kg: Math.round(totalVolume),
+    total_working_sets: totalWorkingSets,
     workouts_count: workoutsCount,
   };
 }
@@ -164,22 +211,22 @@ export function buildWorkoutPeaks(
   for (const s of sets) {
     const w = wmap.get(s.workout_id);
     const e = emap.get(s.exercise_id);
-    if (!w || !e) continue;
-    const est = estimated1RM(s.weight_kg, s.reps);
-    const key = `${s.workout_id}|${s.exercise_id}`;
-    const cur = peakByWorkoutExercise.get(key);
-    if (!cur || est > cur.estimated_1rm) {
-      peakByWorkoutExercise.set(key, {
-        workout_id: s.workout_id,
-        performed_at: w.performed_at,
-        name: w.name,
-        exercise_id: s.exercise_id,
-        exercise_name: e.name,
-        weight_kg: s.weight_kg,
-        reps: s.reps,
-        estimated_1rm: Math.round(est * 100) / 100,
-      });
-    }
+    if (!w || !e) continue;      const est = estimated1RM(s.weight_kg, s.reps);
+      const reps = effectiveReps(s.reps);
+      const key = `${s.workout_id}|${s.exercise_id}`;
+      const cur = peakByWorkoutExercise.get(key);
+      if (!cur || est > cur.estimated_1rm) {
+        peakByWorkoutExercise.set(key, {
+          workout_id: s.workout_id,
+          performed_at: w.performed_at,
+          name: w.name,
+          exercise_id: s.exercise_id,
+          exercise_name: e.name,
+          weight_kg: s.weight_kg,
+          reps,
+          estimated_1rm: Math.round(est * 100) / 100,
+        });
+      }
   }
   return Array.from(peakByWorkoutExercise.values()).sort(
     (a, b) => new Date(a.performed_at).getTime() - new Date(b.performed_at).getTime(),

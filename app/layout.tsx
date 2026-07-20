@@ -49,6 +49,12 @@ export default function RootLayout({
           >
             Fitness
           </Link>
+          <Link
+            href="/settings"
+            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          >
+            Settings
+          </Link>
 
           <div className="ml-auto flex items-center gap-4">
             <AuthButton />

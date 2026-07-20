@@ -159,7 +159,7 @@ export default function StrengthProgress({
           <Card title="Estimated 1RM over time" subtitle="Epley formula, capped at 10 reps">
             {activeStats.timeline.length > 0 ? (
               <>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
                   <StatTile
                     label="Current 1RM"
                     value={
@@ -178,6 +178,7 @@ export default function StrengthProgress({
                     }
                     accent="indigo"
                   />
+                  <StatTile label="Working sets" value={String(activeStats.total_working_sets)} />
                   <StatTile label="Total volume" value={`${(activeStats.total_volume_kg / 1000).toFixed(1)}t`} />
                   <StatTile label="Workouts" value={String(activeStats.workouts_count)} />
                 </div>

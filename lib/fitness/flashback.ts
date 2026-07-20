@@ -21,6 +21,7 @@ import type {
 import {
   buildExerciseStats,
   estimated1RM,
+  effectiveReps,
 } from './strength';
 
 async function safeRun<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
@@ -66,9 +67,11 @@ export function bestEstimated1RMInWindow(
   });
   if (inWindow.length === 0) return null;
   let best = inWindow[0];
-  let bestEst = estimated1RM(best.weight_kg, best.reps);
+  // Treat NULL reps as 1 so weight-only logs still surface as 1RM
+  // lift candidates in flashback comparisons.
+  let bestEst = estimated1RM(best.weight_kg, best.reps ?? 1);
   for (const s of inWindow) {
-    const e = estimated1RM(s.weight_kg, s.reps);
+    const e = estimated1RM(s.weight_kg, s.reps ?? 1);
     if (e > bestEst) {
       best = s;
       bestEst = e;
@@ -263,7 +266,8 @@ export function detectRecentPRs(
   const priorMaxByExRep = new Map<string, number>();
 
   for (const s of sorted) {
-    const key = `${s.exercise_id}|${s.reps}`;
+    const er = effectiveReps(s.reps);
+    const key = `${s.exercise_id}|${er}`;
     const prior = priorMaxByExRep.get(key);
     const newer = new Date(s.created_at).getTime() >= cutoff;
     if (newer && (prior === undefined || s.weight_kg > prior)) {
@@ -272,7 +276,9 @@ export function detectRecentPRs(
         out.push({
           exercise_name: exName,
           weight_kg: s.weight_kg,
-          reps: s.reps,
+          // Use the effective rep count so the surfaced record is
+          // always a number and the UI's `× {p.reps}` is never null.
+          reps: er,
           achieved_at: s.created_at,
         });
         seenPR.add(key);

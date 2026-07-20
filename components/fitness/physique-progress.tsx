@@ -1,27 +1,45 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   listPhysiquePhotos,
-  uploadAndSavePhysiquePhoto,
-  deletePhysiquePhotoRecord,
+  pickFeaturedPhoto,
+  pickLatestPinnedCover,
+  groupPhotosIntoSessions,
   type HydratedPhoto,
 } from '@/lib/fitness/physique';
-import type {
-  PhysiquePhoto,
-  PhysiquePose,
-} from '@/lib/fitness/types';
+import PhysiqueTimeline from './physique-timeline';
+import PhysiqueUploadFlow from './physique-upload-flow';
+import PhysiqueGallery from './physique-gallery';
 
 /**
- * PhysiqueProgress — photographic progress timeline.
+ * PhysiqueProgress — the dashboard-level Physique surface.
  *
- * Photos live in the private `physique-photos` Supabase Storage
- * bucket; the table `physique_photos` holds one row per photo with a
- * date + pose label. The UI:
- *   1. Lets the user upload multiple photos per update with a date.
- *   2. Renders a chronological grid (newest first).
- *   3. Offers a before/after slider — pick any two photos in the
- *      timeline and the UI overlays them with a draggable divider.
+ * New shape (ORION rewrite):
+ *   1. **Compact "Latest" card** — 64×64 thumbnail on the left,
+ *      date + title + featured indicator on the right, two primary
+ *      actions (Open Gallery + View Timeline). Reads the SAME cover
+ *      pin state the gallery uses (`pickLatestPinnedCover`), so the
+ *      two thumbnails are visually guaranteed to match.
+ *   2. **Inline horizontal timeline** (always visible, scroll
+ *      sideways if many sessions). Click a tile to expand an
+ *      inline session-detail panel below the strip.
+ *   3. **Inline upload flow** — "+ Add Progress" toggles the
+ *      session-first upload flow.
+ *   4. **Optimistic mutations** — every mutation (star / cover /
+ *      session edit) updates local state immediately, then awaits
+ *      the Supabase roundtrip. On failure, the previous state is
+ *      restored and a one-liner flash toast surfaces the error.
+ *      This component NEVER calls `onSaved` for purely-local
+ *      mutations — bumping the dashboard's `refreshKey` would
+ *      force WorkoutLog / StrengthProgress / WeightTracking /
+ *      SleepTracking to refetch uselessly.
  */
 export default function PhysiqueProgress({
   userId,
@@ -32,24 +50,118 @@ export default function PhysiqueProgress({
   refreshKey: number;
   onSaved: () => void;
 }) {
-  const [photos, setPhotos] = useState<HydratedPhoto[]>([]);
+  const [allPhotos, setAllPhotos] = useState<HydratedPhoto[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showUpload, setShowUpload] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [quickCompareIds, setQuickCompareIds] = useState<string[] | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  /** Inline flash message at the top of the section; auto-clears after 6 s. */
+  const [flash, setFlash] = useState<{ kind: 'error' | 'info'; text: string; key: number } | null>(null);
 
+  // First-ever mount refetches. Subsequent refreshKey bumps (e.g. on
+  // adding new photos from the upload flow) also refetch — but only
+  // for the upload case, which is wired explicitly below.
+  const initialMountRef = useRef(true);
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      const data = await listPhysiquePhotos(userId);
-      if (cancelled) return;
-      setPhotos(data);
-      setLoading(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [userId, refreshKey]);
+    if (initialMountRef.current) {
+      initialMountRef.current = false;
+      void reload();
+      return;
+    }
+    // Subsequent refreshKey bumps are deliberate refresh signals
+    // from the parent (e.g., a settings change). Refresh then.
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
+
+  async function reload() {
+    setLoading(true);
+    const list = await listPhysiquePhotos(userId);
+    setAllPhotos(list);
+    setLoading(false);
+  }
+
+  // Derived state — sessions and the latest cover pin.
+  const sessions = useMemo(
+    () => groupPhotosIntoSessions(allPhotos),
+    [allPhotos],
+  );
+  const latest = useMemo(
+    () => pickLatestPinnedCover(allPhotos) ?? pickFeaturedPhoto(allPhotos),
+    [allPhotos],
+  );
+
+  // ─── Optimistic mutation infrastructure ────────────────────────
+  //
+  // Children call this when a mutation fires. We:
+  //   1. Snapshot the current photos array (closure capture).
+  //   2. Apply the optimistic state change.
+  //   3. Await the underlying Supabase call.
+  //   4. On failure, restore the snapshot AND show a flash toast.
+  const applyPhotosChange = useCallback(
+    (updater: (prev: HydratedPhoto[]) => HydratedPhoto[]) => {
+      setAllPhotos(updater);
+    },
+    [],
+  );
+
+  // Wrap a mutation with snapshot+revert logic. Children pass the
+  // optimistic updater and the async function to call. Any failure
+  // reverts and surfaces an inline flash.
+  async function runOptimistic(args: {
+    optimistic: (prev: HydratedPhoto[]) => HydratedPhoto[];
+    asyncFn: () => Promise<boolean>;
+    failureText: string;
+  }): Promise<boolean> {
+    let before: HydratedPhoto[] | null = null;
+    setAllPhotos((prev) => {
+      before = prev;
+      return args.optimistic(prev);
+    });
+    const ok = await args.asyncFn();
+    if (!ok) {
+      if (before) setAllPhotos(() => before as HydratedPhoto[]);
+      showFlash('error', args.failureText);
+    }
+    return ok;
+  }
+
+  const showFlash = useCallback(
+    (kind: 'error' | 'info', text: string) => {
+      setFlash({ kind, text, key: Date.now() });
+      // Auto-clear is also done in the useEffect below.
+    },
+    [],
+  );
+
+  // Auto-dismiss flash after 6 s.
+  useEffect(() => {
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [flash]);
+
+  // ─── Quick compare entrypoint (unchanged semantically) ─────────
+  function openQuickCompare() {
+    const candidates = allPhotos.filter((p) => p.is_favourited);
+    const pool = candidates.length >= 2 ? candidates : allPhotos;
+    if (pool.length < 2) {
+      setQuickCompareIds([]);
+    } else {
+      const sorted = [...pool].sort((a, b) => (a.taken_at < b.taken_at ? -1 : 1));
+      setQuickCompareIds([sorted[0].id, sorted[sorted.length - 1].id]);
+    }
+    setGalleryOpen(true);
+  }
+
+  // ─── Handle uploads ──────────────────────────────────────────
+  async function handleUploadSaved() {
+    setUploadOpen(false);
+    // Adding photos IS cross-section data — refresh the whole
+    // dashboard's refreshKey. (Local state update would suffice,
+    // but bumping upstream feels safer given future modules.)
+    onSaved();
+  }
 
   if (loading) {
     return (
@@ -61,449 +173,198 @@ export default function PhysiqueProgress({
 
   return (
     <div className="space-y-6">
-      {error && (
-        <div className="rounded-xl border border-red-900/40 bg-red-950/30 px-4 py-2 text-sm text-red-300">
-          {error}
-        </div>
-      )}
-
-      <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
-        <div className="mb-4 flex items-start justify-between gap-4">
+      {/* ── Compact "Latest Physique" card ───────────────── */}
+      <section
+        aria-label="Physique"
+        className="rounded-2xl border border-zinc-800/60 bg-zinc-900/45 p-5 shadow-sm backdrop-blur-sm"
+      >
+        <div className="mb-4 flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">Progress timeline</h3>
-            <p className="mt-1 text-xs text-zinc-500">
-              Photos are private to your account.
-            </p>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
+              Physique
+            </div>
+            <h3 className="mt-1 text-base font-semibold tracking-tight text-zinc-100">
+              📸 Latest Progress
+            </h3>
           </div>
           <button
-            onClick={() => setShowUpload((s) => !s)}
+            onClick={() => setUploadOpen((s) => !s)}
             className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-500"
           >
-            {showUpload ? 'Cancel' : '+ Add update'}
+            {uploadOpen ? 'Cancel' : '+ Add Progress'}
           </button>
         </div>
 
-        {showUpload && (
-          <UploadForm
-            userId={userId}
-            onUploaded={() => {
-              setShowUpload(false);
-              onSaved();
-            }}
-            onError={(e) => setError(e)}
-          />
-        )}
-
-        {photos.length === 0 ? (
-          <div className="mt-2 rounded-xl border border-dashed border-zinc-800 px-4 py-10 text-center text-xs text-zinc-500">
-            No progress photos yet — click "+ Add update" to record your first entry.
-          </div>
+        {latest ? (
+          <LatestCard photo={latest} />
         ) : (
-          <PhotoTimeline
-            photos={photos}
-            onDelete={async (photo) => {
-              const ok = await deletePhysiquePhotoRecord(photo);
-              if (!ok) {
-                setError('Failed to delete photo');
-                return;
-              }
-              onSaved();
-            }}
-          />
+          <EmptyLatestCard onAddUpdate={() => setUploadOpen(true)} />
         )}
-      </div>
 
-      {/* Before / After slider — needs at least 2 photos */}
-      {photos.length >= 2 && (
-        <ComparisonSlider photos={photos} />
-      )}
-    </div>
-  );
-}
-
-// ─── Upload form ────────────────────────────────────────────────
-
-function UploadForm({
-  userId,
-  onUploaded,
-  onError,
-}: {
-  userId: string;
-  onUploaded: () => void;
-  onError: (msg: string) => void;
-}) {
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const [files, setFiles] = useState<File[]>([]);
-  const [takenAt, setTakenAt] = useState(() => todayISO());
-  const [pose, setPose] = useState<PhysiquePose | 'unspecified'>('unspecified');
-  const [bodyWeight, setBodyWeight] = useState('');
-  const [uploading, setUploading] = useState(false);
-
-  async function handleSubmit() {
-    if (files.length === 0) {
-      onError('Pick at least one photo before saving');
-      return;
-    }
-    setUploading(true);
-    let succeeded = 0;
-    let lastErr: string | null = null;
-    for (const f of files) {
-      const created = await uploadAndSavePhysiquePhoto({
-        userId,
-        file: f,
-        taken_at: takenAt,
-        pose_type: pose === 'unspecified' ? null : pose,
-        body_weight_kg: bodyWeight.trim() ? parseFloat(bodyWeight) : null,
-      });
-      if (created) succeeded += 1;
-      else lastErr = `Failed to upload ${f.name}`;
-    }
-    setUploading(false);
-    if (succeeded === 0) {
-      onError(lastErr ?? 'Upload failed');
-      return;
-    }
-    setFiles([]);
-    if (fileRef.current) fileRef.current.value = '';
-    onUploaded();
-  }
-
-  return (
-    <div className="mb-5 rounded-xl border border-zinc-800/70 bg-zinc-900/40 p-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div>
-          <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-            Date
-          </label>
-          <input
-            type="date"
-            value={takenAt}
-            onChange={(e) => setTakenAt(e.target.value)}
-            max={todayISO()}
-            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-            Pose
-          </label>
-          <select
-            value={pose}
-            onChange={(e) => setPose(e.target.value as PhysiquePose | 'unspecified')}
-            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+        {/* Two primary actions: Open Gallery + View Timeline. The */}
+        {/* timeline is already visible below; "View Timeline"    */}
+        {/* scrolls the section into view (smooth, no jump).      */}
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-zinc-800/60 pt-4">
+          <button
+            onClick={openQuickCompare}
+            disabled={allPhotos.length < 2}
+            className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <option value="unspecified">—</option>
-            <option value="front">Front</option>
-            <option value="back">Back</option>
-            <option value="side">Side</option>
-            <option value="other">Other</option>
-          </select>
+            Quick comparison
+          </button>
+          <button
+            onClick={() => {
+              document
+                .getElementById('physique-timeline')
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
+            className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
+          >
+            View timeline
+          </button>
+          <button
+            onClick={() => setGalleryOpen(true)}
+            className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
+          >
+            Open Gallery
+          </button>
         </div>
-        <div>
-          <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-            Weight (kg, optional)
-          </label>
-          <input
-            type="number"
-            inputMode="decimal"
-            step="0.1"
-            min={0}
-            value={bodyWeight}
-            onChange={(e) => setBodyWeight(e.target.value)}
-            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-          />
-        </div>
-      </div>
 
-      <div className="mt-3">
-        <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-          Photo(s)
-        </label>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-          className="block w-full text-xs text-zinc-300 file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-700 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-zinc-200 hover:file:bg-zinc-600"
-        />
-        {files.length > 0 && (
-          <p className="mt-1 text-[10px] text-zinc-500">
-            {files.length} photo{files.length === 1 ? '' : 's'} selected
-          </p>
-        )}
-      </div>
-
-      <div className="mt-4 flex items-center justify-end">
-        <button
-          onClick={handleSubmit}
-          disabled={uploading || files.length === 0}
-          className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-40"
-        >
-          {uploading ? 'Uploading…' : `Save ${files.length || ''} photo${files.length === 1 ? '' : 's'}`}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Photo timeline ─────────────────────────────────────────────
-
-function PhotoTimeline({
-  photos,
-  onDelete,
-}: {
-  photos: HydratedPhoto[];
-  onDelete: (p: PhysiquePhoto) => void;
-}) {
-  // Group photos by taken_at so multiple photos on the same day render
-  // as one "update" tile with thumbnails inside.
-  const grouped = new Map<string, HydratedPhoto[]>();
-  for (const p of photos) {
-    const arr = grouped.get(p.taken_at) ?? [];
-    arr.push(p);
-    grouped.set(p.taken_at, arr);
-  }
-  const dates = Array.from(grouped.keys()).sort((a, b) => (a < b ? 1 : -1));
-
-  return (
-    <div className="space-y-4">
-      {dates.map((date) => {
-        const group = grouped.get(date) ?? [];
-        return (
-          <div key={date} className="rounded-xl border border-zinc-800/70 bg-zinc-900/40 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-[10px] font-medium uppercase tracking-[0.15em] text-zinc-500">
-                {formatTimelineDate(date)}
-              </div>
-              <div className="text-[10px] text-zinc-600">
-                {group.length} photo{group.length === 1 ? '' : 's'}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-              {group.map((p) => (
-                <PhotoTile key={p.id} photo={p} onDelete={() => onDelete(p)} />
-              ))}
-            </div>
+        {/* Inline upload flow */}
+        {uploadOpen && (
+          <div className="mt-4">
+            <PhysiqueUploadFlow
+              userId={userId}
+              onError={(msg) => showFlash('error', msg)}
+              onCancel={() => setUploadOpen(false)}
+              onSaved={() => void handleUploadSaved()}
+            />
           </div>
-        );
-      })}
-    </div>
-  );
-}
+        )}
+      </section>
 
-function PhotoTile({
-  photo,
-  onDelete,
-}: {
-  photo: HydratedPhoto;
-  onDelete: () => void;
-}) {
-  const label = photo.pose_type ? photo.pose_type[0].toUpperCase() + photo.pose_type.slice(1) : 'Photo';
-  return (
-    <div className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
-      {photo.url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={photo.url}
-          alt={`Physique photo ${photo.taken_at} — ${label}`}
-          className="aspect-square w-full object-cover"
-          loading="lazy"
-        />
-      ) : (
-        <div className="flex aspect-square w-full items-center justify-center text-xs text-zinc-600">
-          loading…
+      {/* ── Inline flash toast ─────────────────────────────── */}
+      {flash && (
+        <div
+          key={flash.key}
+          role="alert"
+          className={`rounded-xl border px-4 py-2 text-sm shadow-lg backdrop-blur ${
+            flash.kind === 'error'
+              ? 'border-red-900/40 bg-red-950/40 text-red-200'
+              : 'border-zinc-700/60 bg-zinc-900/70 text-zinc-200'
+          }`}
+        >
+          {flash.text}
+          <button
+            className="ml-2 text-zinc-500 hover:text-zinc-300"
+            onClick={() => setFlash(null)}
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
         </div>
       )}
-      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-gradient-to-t from-black/70 to-transparent px-2 py-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-white/90">
-          {label}
-        </span>
-        {photo.body_weight_kg && (
-          <span className="text-[10px] text-white/70">
-            {photo.body_weight_kg}kg
-          </span>
+
+      {/* ── Always-visible horizontal timeline ─────────────── */}
+      <section id="physique-timeline" aria-label="Featured timeline">
+        <PhysiqueTimeline
+          photos={allPhotos}
+          onPhotosChanged={applyPhotosChange}
+          showToast={(text) => showFlash('error', text)}
+        />
+      </section>
+
+      {/* ── Gallery modal ──────────────────────────────────── */}
+      {galleryOpen && (
+        <PhysiqueGallery
+          photos={allPhotos}
+          userId={userId}
+          initialSelection={quickCompareIds ?? undefined}
+          initialComparing={quickCompareIds !== null}
+          applyPhotosChange={applyPhotosChange}
+          showToast={(text) => showFlash('error', text)}
+          onClose={() => {
+            setGalleryOpen(false);
+            setQuickCompareIds(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Compact LatestCard (replaces the old big 16:9 hero) ─────────
+
+function LatestCard({ photo }: { photo: HydratedPhoto }) {
+  const label = photo.pose_type ?? 'Photo';
+  const featuredBadge = photo.is_favourited ? '⭐ Featured' : 'Latest';
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+      {/* 64×64 thumbnail on the left */}
+      <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-black">
+        {photo.url ? (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            src={photo.url}
+            alt={`Latest featured progress — ${photo.taken_at}`}
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[10px] text-zinc-600">
+            loading…
+          </div>
         )}
       </div>
+      {/* Info column */}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="rounded-md bg-zinc-800/70 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-300">
+            {label}
+          </span>
+          <span className="font-mono text-xs text-zinc-300">
+            {photo.taken_at}
+          </span>
+          {photo.body_weight_kg && (
+            <span className="text-[10px] text-zinc-500">
+              · {photo.body_weight_kg}kg
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 truncate text-[11px] font-medium text-zinc-200">
+          {photo.session_title ?? <span className="italic text-zinc-500">Untitled session</span>}
+        </div>
+        <div className="mt-0.5 text-[10px] text-zinc-500">{featuredBadge}</div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyLatestCard({ onAddUpdate }: { onAddUpdate: () => void }) {
+  return (
+    <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-8 text-center">
+      <div className="mx-auto mb-2 inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
+        <CameraIcon />
+      </div>
+      <h4 className="text-sm font-semibold text-zinc-100">No progress photos yet</h4>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        Add your first progress session — front / side / back, all on the same day, with optional notes.
+      </p>
       <button
-        onClick={onDelete}
-        className="absolute right-1.5 top-1.5 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-red-300 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100"
-        aria-label="Delete photo"
+        onClick={onAddUpdate}
+        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-500"
       >
-        Delete
+        + Add Progress
       </button>
     </div>
   );
 }
 
-// ─── Before / After slider ──────────────────────────────────────
-
-function ComparisonSlider({ photos }: { photos: HydratedPhoto[] }) {
-  // Default: oldest on the left, newest on the right.
-  const sorted = [...photos].sort((a, b) =>
-    a.taken_at < b.taken_at ? -1 : 1
-  );
-  const initialBefore = sorted[0];
-  const initialAfter = sorted[sorted.length - 1];
-  const [beforeId, setBeforeId] = useState<string>(initialBefore.id);
-  const [afterId, setAfterId] = useState<string>(initialAfter.id);
-  const before = photos.find((p) => p.id === beforeId) ?? initialBefore;
-  const after = photos.find((p) => p.id === afterId) ?? initialAfter;
-
+function CameraIcon() {
   return (
-    <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-zinc-100">Before / After</h3>
-          <p className="mt-0.5 text-xs text-zinc-500">Drag the divider to compare</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <DatePicker
-            label="Before"
-            options={sorted}
-            value={beforeId}
-            onChange={setBeforeId}
-          />
-          <DatePicker
-            label="After"
-            options={sorted}
-            value={afterId}
-            onChange={setAfterId}
-          />
-        </div>
-      </div>
-      <ComparisonFrame before={before} after={after} />
-    </div>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+      <circle cx="12" cy="13" r="4" />
+    </svg>
   );
-}
-
-function DatePicker({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: HydratedPhoto[];
-  value: string;
-  onChange: (id: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
-      >
-        {options.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.taken_at}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-function ComparisonFrame({
-  before,
-  after,
-}: {
-  before: HydratedPhoto;
-  after: HydratedPhoto;
-}) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [split, setSplit] = useState(50); // % from the left
-  const isDragging = useRef(false);
-
-  function handleDown() {
-    isDragging.current = true;
-  }
-  function handleUp() {
-    isDragging.current = false;
-  }
-  function handleMove(e: React.PointerEvent) {
-    if (!isDragging.current || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
-    setSplit(pct);
-  }
-
-  return (
-    <div
-      ref={containerRef}
-      onPointerDown={handleDown}
-      onPointerUp={handleUp}
-      onPointerMove={handleMove}
-      onPointerCancel={handleUp}
-      className="relative aspect-[3/4] w-full cursor-ew-resize overflow-hidden rounded-xl border border-zinc-800 bg-black sm:aspect-[4/3]"
-      role="slider"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(split)}
-    >
-      {/* After (background) */}
-      {after.url && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={after.url}
-          alt={`After — ${after.taken_at}`}
-          className="absolute inset-0 h-full w-full object-cover"
-          draggable={false}
-        />
-      )}
-      {/* Before (clipped) */}
-      {before.url && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={before.url}
-          alt={`Before — ${before.taken_at}`}
-          className="absolute inset-0 h-full w-full object-cover"
-          style={{ clipPath: `polygon(0 0, ${split}% 0, ${split}% 100%, 0 100%)` }}
-          draggable={false}
-        />
-      )}
-      {/* Divider */}
-      <div
-        className="absolute inset-y-0 z-10 w-0.5 bg-white shadow-[0_0_8px_rgba(255,255,255,0.5)]"
-        style={{ left: `${split}%`, transform: 'translateX(-50%)' }}
-      />
-      <div
-        className="absolute top-1/2 z-10 flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white/80 bg-black/60 text-white shadow-lg"
-        style={{ left: `${split}%` }}
-      >
-        <span className="text-base leading-none">⇔</span>
-      </div>
-      {/* Labels */}
-      <div className="pointer-events-none absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[11px] font-medium text-white">
-        Before · {before.taken_at}
-      </div>
-      <div className="pointer-events-none absolute right-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[11px] font-medium text-white">
-        After · {after.taken_at}
-      </div>
-    </div>
-  );
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────
-
-function todayISO(): string {
-  const d = new Date();
-  return [
-    d.getFullYear(),
-    String(d.getMonth() + 1).padStart(2, '0'),
-    String(d.getDate()).padStart(2, '0'),
-  ].join('-');
-}
-
-function formatTimelineDate(date: string): string {
-  const dt = new Date(date + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
 }

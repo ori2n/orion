@@ -8,12 +8,25 @@ import {
   averageHours,
   computeHours,
 } from '@/lib/fitness/sleep';
+import { logEvent, EventTypes } from '@/lib/events';
 import type { SleepEntry } from '@/lib/fitness/types';
 
 /**
- * SleepTracking — minimal entry: bedtime + wake time + quality.
- * `hours` is a Postgres-generated column (`wake - bedtime`) so we
- * never write it. The UI surfaces it for display.
+ * SleepTracking — actionable sleep logging.
+ *
+ * Two surfaces, sharing the same height budget:
+ *
+ *   - **Confirmation card**: rendered after a successful save. Shows
+ *     today's logged hours, bedtime → wake, and two actions
+ *     ([Edit] returns to the form, [View history] expands the recent
+ *     list inline).
+ *
+ *   - **Entry form**: the actual inputs. Shown by default until the
+ *     first save, and re-shown whenever the user clicks Edit.
+ *
+ * The "Recent entries" list sits beneath the form / confirmation and
+ * is always available — the confirmation card's "View history" button
+ * just scrolls to the list so power users can jump straight to it.
  */
 export default function SleepTracking({
   userId,
@@ -35,6 +48,10 @@ export default function SleepTracking({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Confirmation state — non-null when today's date has been logged.
+  // `mode` controls whether the form or the confirmation card shows.
+  const [mode, setMode] = useState<'form' | 'confirmation'>('form');
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -43,18 +60,35 @@ export default function SleepTracking({
       if (cancelled) return;
       setEntries(data);
       setLoading(false);
+
+      // Decide initial mode: if today's date already has an entry, jump
+      // straight into the confirmation card; otherwise show the form.
+      const todayMatch = data.find((e) => e.sleep_date === todayISO());
+      if (todayMatch) {
+        hydrateFromEntry(todayMatch);
+      }
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, refreshKey]);
 
   const avg = useMemo(() => averageHours(entries.slice(0, 7)), [entries]);
 
   const previewHours = useMemo(
     () => computeHours(toISO(date, bedtime), toISO(date, wakeTime)),
-    [date, bedtime, wakeTime]
+    [date, bedtime, wakeTime],
   );
+
+  function hydrateFromEntry(entry: SleepEntry) {
+    setMode('confirmation');
+    setDate(entry.sleep_date);
+    setBedtime(toHHMM(entry.bedtime));
+    setWakeTime(toHHMM(entry.wake_time));
+    setQuality(entry.quality);
+    setNotes(entry.notes ?? '');
+  }
 
   async function handleSave() {
     if (saving) return;
@@ -79,7 +113,13 @@ export default function SleepTracking({
       setError('Failed to save entry.');
       return;
     }
-    setNotes('');
+    // Background event for the future AI pipeline.
+    void logEvent(EventTypes.SLEEP_LOG, {
+      sleep_date: date,
+      bedtime: bedtimeISO,
+      wake_time: applyWakeDate(wakeTimeISO, bedtimeISO),
+      hours: previewHours,
+    });
     onSaved();
   }
 
@@ -90,6 +130,19 @@ export default function SleepTracking({
       return;
     }
     onSaved();
+  }
+
+  function startEdit() {
+    setMode('form');
+    setError(null);
+  }
+
+  function viewHistory() {
+    // Scroll the recent list into view — works even when collapsed
+    // (the list itself never collapses, but anchoring the scroll
+    // gives a satisfying tactile feedback).
+    const list = document.getElementById('sleep-history-list');
+    list?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   if (loading) {
@@ -108,7 +161,7 @@ export default function SleepTracking({
         </div>
       )}
 
-      {/* Average tile */}
+      {/* Average tile (always visible — context for both modes) */}
       <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
         <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-indigo-400/70">
           7-day average
@@ -123,92 +176,108 @@ export default function SleepTracking({
         </div>
       </div>
 
-      {/* Entry form */}
-      <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
-        <h3 className="mb-3 text-sm font-semibold text-zinc-100">Log sleep</h3>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div>
+      {mode === 'form' ? (
+        /* Form mode */
+        <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
+          <h3 className="mb-3 text-sm font-semibold text-zinc-100">Log sleep</h3>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+                Date
+              </label>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                max={todayISO()}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+                Bedtime
+              </label>
+              <input
+                type="time"
+                value={bedtime}
+                onChange={(e) => setBedtime(e.target.value)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+                Wake time
+              </label>
+              <input
+                type="time"
+                value={wakeTime}
+                onChange={(e) => setWakeTime(e.target.value)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+                Quality
+              </label>
+              <select
+                value={quality ?? ''}
+                onChange={(e) => setQuality(e.target.value ? Number(e.target.value) : null)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+              >
+                <option value="">—</option>
+                <option value="1">1 · terrible</option>
+                <option value="2">2 · poor</option>
+                <option value="3">3 · ok</option>
+                <option value="4">4 · good</option>
+                <option value="5">5 · great</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="mt-3">
             <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-              Date
+              Notes (optional)
             </label>
             <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              max={todayISO()}
+              type="text"
+              placeholder="e.g. woke up twice"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
               className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
             />
           </div>
-          <div>
-            <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-              Bedtime
-            </label>
-            <input
-              type="time"
-              value={bedtime}
-              onChange={(e) => setBedtime(e.target.value)}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-              Wake time
-            </label>
-            <input
-              type="time"
-              value={wakeTime}
-              onChange={(e) => setWakeTime(e.target.value)}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-              Quality
-            </label>
-            <select
-              value={quality ?? ''}
-              onChange={(e) => setQuality(e.target.value ? Number(e.target.value) : null)}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
+
+          <div className="mt-4 flex items-center justify-between border-t border-zinc-800/60 pt-4">
+            <span className="text-xs text-zinc-500">
+              {previewHours > 0 ? `Computes to ${previewHours.toFixed(1)}h` : 'Invalid range'}
+            </span>
+            <button
+              onClick={handleSave}
+              disabled={saving || previewHours <= 0}
+              className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-40"
             >
-              <option value="">—</option>
-              <option value="1">1 · terrible</option>
-              <option value="2">2 · poor</option>
-              <option value="3">3 · ok</option>
-              <option value="4">4 · good</option>
-              <option value="5">5 · great</option>
-            </select>
+              {saving ? 'Saving…' : 'Save'}
+            </button>
           </div>
         </div>
-
-        <div className="mt-3">
-          <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-            Notes (optional)
-          </label>
-          <input
-            type="text"
-            placeholder="e.g. woke up twice"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-          />
-        </div>
-
-        <div className="mt-4 flex items-center justify-between border-t border-zinc-800/60 pt-4">
-          <span className="text-xs text-zinc-500">
-            {previewHours > 0 ? `Computes to ${previewHours.toFixed(1)}h` : 'Invalid range'}
-          </span>
-          <button
-            onClick={handleSave}
-            disabled={saving || previewHours <= 0}
-            className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-40"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
+      ) : (
+        /* Confirmation mode */
+        <SleepConfirmationCard
+          hours={previewHours}
+          bedtimeLabel={formatTime(bedtime)}
+          wakeLabel={formatTime(wakeTime)}
+          date={date}
+          quality={quality}
+          onEdit={startEdit}
+          onViewHistory={viewHistory}
+        />
+      )}
 
       {/* Recent list */}
-      <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm">
+      <div
+        id="sleep-history-list"
+        className="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-5 shadow-sm backdrop-blur-sm"
+      >
         <h3 className="mb-3 text-sm font-semibold text-zinc-100">Recent entries</h3>
         {entries.length === 0 ? (
           <p className="rounded-xl border border-dashed border-zinc-800 px-4 py-8 text-center text-xs text-zinc-500">
@@ -259,13 +328,95 @@ export default function SleepTracking({
   );
 }
 
-// Convert YYYY-MM-DD + HH:MM to ISO. "Bedtime" can roll to next day;
-// handled separately for wake time below.
+// ─── Confirmation surface ──────────────────────────────────────
+
+function SleepConfirmationCard({
+  hours,
+  bedtimeLabel,
+  wakeLabel,
+  date,
+  quality,
+  onEdit,
+  onViewHistory,
+}: {
+  hours: number;
+  bedtimeLabel: string;
+  wakeLabel: string;
+  date: string;
+  quality: number | null;
+  onEdit: () => void;
+  onViewHistory: () => void;
+}) {
+  const isShort = hours > 0 && hours < 6;
+  return (
+    <div
+      className="rounded-2xl border border-emerald-700/30 bg-emerald-950/15 p-5 shadow-sm backdrop-blur-sm"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex items-start gap-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-300">
+          <TickIcon />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-emerald-400/80">
+            Sleep logged
+          </div>
+          <div className="mt-1 text-3xl font-semibold tracking-tight text-zinc-100">
+            {hours.toFixed(0)}h {Math.round((hours % 1) * 60)
+              .toString()
+              .padStart(2, '0')}
+            m
+          </div>
+          <div className="mt-1 font-mono text-sm text-zinc-300">
+            {bedtimeLabel} → {wakeLabel}
+          </div>
+          <div className="mt-3 text-sm text-zinc-400">
+            {isShort
+              ? 'Short night — log it and forget it.'
+              : 'Well done.'}
+            {quality && (
+              <span className="ml-1 text-zinc-500">· quality {quality}/5</span>
+            )}
+            {!quality && (
+              <span className="ml-1 text-zinc-600">· {date}</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-emerald-800/30 pt-4">
+        <button
+          onClick={onEdit}
+          className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-800"
+        >
+          Edit
+        </button>
+        <button
+          onClick={onViewHistory}
+          className="rounded-lg border border-transparent bg-transparent px-4 py-2 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800/50 hover:text-zinc-200"
+        >
+          View history
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TickIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6L9 17l-5-5" />
+    </svg>
+  );
+}
+
+// ─── Time helpers ──────────────────────────────────────────────
+
 function toISO(date: string, time: string): string {
   return new Date(`${date}T${time}:00`).toISOString();
 }
 
-// If wake time appears before bedtime on the same date, push wake to next day.
 function applyWakeDate(wakeISO: string, bedtimeISO: string): string {
   const wake = new Date(wakeISO);
   const bed = new Date(bedtimeISO);
@@ -278,4 +429,14 @@ function applyWakeDate(wakeISO: string, bedtimeISO: string): string {
 function todayISO(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function toHHMM(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function formatTime(hhmm: string): string {
+  // Display "23:18" as "23:18" — locale string adds a space we'd rather avoid.
+  return hhmm;
 }
