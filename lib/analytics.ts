@@ -208,3 +208,70 @@ function getWeekStart(dateStr: string): string {
   const monday = new Date(d.setDate(diff));
   return monday.toISOString().slice(0, 10);
 }
+
+/**
+ * Per-habit completion history for the last `days` days.
+ * Returns one entry per day, ordered OLDEST → TODAY (so the right-most
+ * cell in a 6×5 grid is today).
+ *
+ * Each entry: { date: 'YYYY-MM-DD', completed: boolean }
+ *
+ * Reuses the existing `habit_completions` table — does NOT create a
+ * duplicate tracking system. Multiple completions on the same day
+ * collapse to a single `completed: true` via Set membership.
+ *
+ * Returns an empty array on error or any invalid input. Never throws.
+ */
+export async function getHabitCompletionHistory(
+  habitId: string,
+  days: number = 30,
+  userId?: string | null,
+): Promise<Array<{ date: string; completed: boolean }>> {
+  if (!habitId || !Number.isFinite(days) || days <= 0) return [];
+
+  try {
+    // Compute inclusive date range [today - (days-1), today].
+    const today = new Date();
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - (days - 1));
+    const startStr = startDate.toISOString().slice(0, 10);
+    const endStr = today.toISOString().slice(0, 10);
+
+    let query = supabase
+      .from('habit_completions')
+      .select('completed_date')
+      .eq('habit_id', habitId)
+      .gte('completed_date', startStr)
+      .lte('completed_date', endStr);
+
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('[analytics] getHabitCompletionHistory failed:', error.message);
+      return [];
+    }
+
+    // Dedupe — multiple completions on the same day collapse to "done".
+    const completedSet = new Set<string>();
+    for (const row of data ?? []) {
+      completedSet.add(row.completed_date);
+    }
+
+    // Emit exactly `days` entries, oldest → today.
+    const out: Array<{ date: string; completed: boolean }> = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      out.push({ date: dateStr, completed: completedSet.has(dateStr) });
+    }
+    return out;
+  } catch (err) {
+    console.error('[analytics] getHabitCompletionHistory exception:', err);
+    return [];
+  }
+}

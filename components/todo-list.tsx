@@ -289,7 +289,7 @@ export default function TodoList() {
           </p>
         </div>
       ) : (
-        <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
           {grouped.map((bucket) => (
             <TaskRow
               key={bucket.section}
@@ -383,7 +383,7 @@ function TaskRow({
         }
         onDrop(e, newDate);
       }}
-      className={`rounded-xl border transition-all duration-200 ${sectionColor} ${draggedId ? 'min-h-[120px]' : ''}`}
+      className={`flex h-full flex-col overflow-hidden rounded-2xl border shadow-sm transition-all duration-200 ${sectionColor} ${draggedId ? 'min-h-[160px]' : ''}`}
     >
       {/* Row header */}
       <div className={`border-b px-4 py-3 ${headerBorderColor}`}>
@@ -400,7 +400,7 @@ function TaskRow({
       </div>
 
       {/* Tasks */}
-      <div className="space-y-2 p-3">
+      <div className="space-y-2 p-4">
         {tasks.length === 0 ? (
           <div className="flex items-center justify-center rounded-lg border-2 border-dashed border-zinc-200 py-6 dark:border-zinc-700">
             <p className="text-xs text-zinc-300 dark:text-zinc-600">

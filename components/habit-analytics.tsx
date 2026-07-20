@@ -17,6 +17,7 @@ import {
   getCompletionsPerHabit,
   getCompletionRate,
 } from '@/lib/analytics';
+import { useMemo } from 'react';
 
 function formatDate(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00');
@@ -34,7 +35,23 @@ function subtractDays(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: number; userId?: string | null }) {
+export default function HabitAnalytics({
+  refreshKey,
+  userId,
+  windowDays = 30,
+}: {
+  refreshKey?: number;
+  userId?: string | null;
+  /**
+   * Window size for all three analytics charts, in days. Defaults to
+   * 30 days so the existing layout stays the same when no value is
+   * passed. When the user picks 7d or 14d via the segmented control
+   * in `ActionsPage`, the same `startDate = subtractDays(windowDays-1)`
+   * is used to query `habit_completions` for daily counts, per-habit
+   * breakdown, and completion rate.
+   */
+  windowDays?: 7 | 14 | 30;
+}) {
   const [mounted, setMounted] = useState(false);
   const [dailyData, setDailyData] = useState<{ date: string; count: number }[]>([]);
   const [habitBreakdown, setHabitBreakdown] = useState<
@@ -46,6 +63,9 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
   const [todayCount, setTodayCount] = useState(0);
   const [thisWeekRate, setThisWeekRate] = useState(0);
   const [loading, setLoading] = useState(true);
+  // Sort mode for the "By Habit" breakdown chart. UI-driven; default
+  // matches the previous hardcoded behavior (most completed first).
+  const [habitSort, setHabitSort] = useState<'top' | 'bottom' | 'az'>('top');
 
   useEffect(() => {
     // Delay chart rendering until layout is settled
@@ -59,11 +79,14 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
     async function load() {
       setLoading(true);
       const todayStr = subtractDays(0);
+      // Single startDate drives all three chart queries — when the user
+      // switches the window, this reruns the same fetches for the new range.
+      const startStr = subtractDays(windowDays - 1);
 
       const [daily, breakdown, rate] = await Promise.all([
-        getDailyCompletionCounts(subtractDays(13), todayStr, userId),
-        getCompletionsPerHabit(subtractDays(29), todayStr, userId),
-        getCompletionRate(subtractDays(6), todayStr, userId),
+        getDailyCompletionCounts(startStr, todayStr, userId),
+        getCompletionsPerHabit(startStr, todayStr, userId),
+        getCompletionRate(startStr, todayStr, userId),
       ]);
 
       if (cancelled) return;
@@ -77,9 +100,9 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
       }
 
       setDailyData(filledDaily);
-      setHabitBreakdown(
-        breakdown.sort((a, b) => b.completions - a.completions),
-      );
+      // Store raw rows — `sortedHabitBreakdown` below applies the user's
+      // chosen sort order on render.
+      setHabitBreakdown(breakdown);
       setRateData(
         rate.map((r) => ({
           date: r.date,
@@ -104,14 +127,31 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+    // Rerun when the window changes, the parent forces a refresh, or the
+    // signed-in user switches.
+  }, [refreshKey, windowDays, userId]);
+
+  // Apply the user's chosen sort. Recomputed only when `habitBreakdown`
+  // or `habitSort` changes, so toggling sort never re-fetches data and
+  // is essentially free.
+  const sortedHabitBreakdown = useMemo(() => {
+    if (!habitBreakdown || habitBreakdown.length === 0) return [];
+    const arr = [...habitBreakdown];
+    switch (habitSort) {
+      case 'top':
+        return arr.sort((a, b) => b.completions - a.completions);
+      case 'bottom':
+        return arr.sort((a, b) => a.completions - b.completions);
+      case 'az':
+        return arr.sort((a, b) => a.habitName.localeCompare(b.habitName));
+      default:
+        return arr;
+    }
+  }, [habitBreakdown, habitSort]);
 
   if (loading) {
     return (
-      <section className="mt-16">
-        <h2 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-          Analytics
-        </h2>
+      <section>
         <div className="mt-6 grid gap-6 sm:grid-cols-3">
           {[1, 2, 3].map((i) => (
             <div
@@ -125,7 +165,7 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
   }
 
   return (
-    <section className="mt-16">
+    <section>
       <h2 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
         Analytics
       </h2>
@@ -173,10 +213,9 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
       <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
           Daily Completions
-        </h3>
-        <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-          Last 14 days
-        </p>
+        </h3>          <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+            Last {windowDays} days
+          </p>
         <div className="mt-4 h-56 min-w-0">
           {mounted && (
             <ResponsiveContainer width="100%" height="100%">
@@ -229,17 +268,51 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
       <div className="mt-6 grid gap-6 sm:grid-cols-2">
         {/* Per-Habit Breakdown */}
         <div className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-            By Habit
-          </h3>
-          <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-            Completions in the last 30 days
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                By Habit
+              </h3>
+              <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                Completions in the last {windowDays} days
+              </p>
+            </div>
+            {/* Sort selector — same pill style as the window control above */}
+            <div
+              className="flex shrink-0 gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800"
+              role="group"
+              aria-label="Sort habits"
+            >
+              {(
+                [
+                  { key: 'top', label: 'Top \u2193' },
+                  { key: 'bottom', label: 'Bottom \u2191' },
+                  { key: 'az', label: 'A\u2192Z' },
+                ] as const
+              ).map((opt) => {
+                const active = habitSort === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    onClick={() => setHabitSort(opt.key)}
+                    aria-pressed={active}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-all duration-200 ${
+                      active
+                        ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
+                        : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <div className="mt-4 h-64 min-w-0">
             {mounted && (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
-                  data={habitBreakdown}
+                  data={sortedHabitBreakdown}
                   layout="vertical"
                   barCategoryGap="25%"
                 >
@@ -294,7 +367,7 @@ export default function HabitAnalytics({ refreshKey, userId }: { refreshKey?: nu
             Completion Rate
           </h3>
           <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-            Percentage of habits completed each day
+            Percentage of habits completed each day (last {windowDays} days)
           </p>
           <div className="mt-4 h-64 min-w-0">
             {mounted && (

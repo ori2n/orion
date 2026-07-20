@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getCurrentUserId } from '@/lib/auth';
+import { getHabitCompletionHistory } from '@/lib/analytics';
 import { EventTypes, logEvent } from '@/lib/events';
 import HabitAnalytics from '@/components/habit-analytics';
 import TodoList from '@/components/todo-list';
@@ -155,6 +156,10 @@ export default function ActionsPage() {
 
   // Analytics refresh trigger
   const [analyticsKey, setAnalyticsKey] = useState(0);
+  // Window (7 / 14 / 30 days) for the analytics bar + area charts.
+  // Defaults to 30 days so the existing "By Habit" view stays the same
+  // until the user opts into a wider / narrower window.
+  const [analyticsWindow, setAnalyticsWindow] = useState<7 | 14 | 30>(30);
 
   // Error state
   const [error, setError] = useState<string | null>(null);
@@ -478,8 +483,19 @@ export default function ActionsPage() {
       return;
     }
 
-    const targetTagId = getTagIdByName(targetSection);
-    if (!targetTagId) {
+    // "Uncategorised" is a virtual section — it holds habits whose tag has
+    // been cleared (or never set). Dropping a habit INTO it unsets the tag;
+    // dropping INTO any other section assigns the matching tag. The DB
+    // column is nullable, so we send null for Uncategorised and the tag id
+    // otherwise. Client state uses '' for "no tag" to mirror the existing
+    // removeSection() pattern.
+    const isUncategorised = targetSection === 'Uncategorised';
+    const targetTagId = isUncategorised
+      ? ''
+      : (getTagIdByName(targetSection) ?? '');
+
+    if (!isUncategorised && !targetTagId) {
+      // Tag not found in the loaded list — silently no-op.
       setDraggedHabitId(null);
       setDragOverSection(null);
       return;
@@ -493,7 +509,7 @@ export default function ActionsPage() {
 
     const { error: updateError } = await supabase
       .from('habits')
-      .update({ tag_id: targetTagId })
+      .update({ tag_id: isUncategorised ? null : targetTagId })
       .eq('id', habitId);
 
     if (updateError) {
@@ -681,7 +697,7 @@ export default function ActionsPage() {
 
   return (
     <div className="min-h-screen w-full bg-zinc-50 dark:bg-zinc-950">
-      <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8">
         {/* Header */}
         <header className="mb-8">
           <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
@@ -729,8 +745,8 @@ export default function ActionsPage() {
           </div>
         )}
 
-        {/* Section-based Habits List */}
-        <div className="space-y-3">
+        {/* Section-based Habits List — card grid */}
+        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
           {sectionOrder.map((sectionName, idx) => {
             const grouped = groupHabitsBySection();
             const sectionHabits = grouped.get(sectionName) ?? [];
@@ -816,7 +832,7 @@ export default function ActionsPage() {
 
                 {/* Habit cards */}
                 {!isCollapsed && (
-                  <div className="space-y-1.5 p-3">
+                  <div className="space-y-2 p-4">
                     {sectionHabits.length === 0 ? (
                       <div
                         className={`flex items-center justify-center rounded-lg border-2 border-dashed py-8 transition-colors duration-200 ${
@@ -844,6 +860,7 @@ export default function ActionsPage() {
                             onDragStart={(e) => handleHabitDragStart(e, habit.id)}
                             onDragEnd={handleHabitDragEnd}
                             isLoading={togglingRef.current.has(habit.id)}
+                            userId={userId}
                           />
                         );
                       })
@@ -853,9 +870,14 @@ export default function ActionsPage() {
               </SectionContainer>
             );
           })}
+        </div>
 
-          {/* Add section button */}
-          <div className="flex items-center justify-center pt-1">
+        {/* Add section button — sits BELOW the grid, centered, and is
+            intentionally OUTSIDE the grid container. If it were nested
+            inside as the last child, it would become a grid cell that
+            stretches to card height on the lg:grid-cols-2 row, washing
+            the dashed button out into a tall empty space. */}
+        <div className="mt-4 flex items-center justify-center sm:mt-6">
             {showNewSection ? (
               <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
                 <input
@@ -896,10 +918,47 @@ export default function ActionsPage() {
               </button>
             )}
           </div>
-        </div>
 
-        {/* Analytics section — auto-refreshes on completion toggle */}
-        {habits.length > 0 && <HabitAnalytics refreshKey={analyticsKey} userId={userId} />}
+        {/* Analytics: window selector (above) + chart section (below).
+            The control drives the bar / area / per-habit charts via the
+            `windowDays` prop passing down into HabitAnalytics. */}
+        {habits.length > 0 && (
+          <>
+            <div className="mt-12 mb-3 flex items-center justify-end gap-2">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                Window
+              </span>
+              <div
+                className="flex gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800"
+                role="group"
+                aria-label="Analytics window"
+              >
+                {([7, 14, 30] as const).map((d) => {
+                  const active = analyticsWindow === d;
+                  return (
+                    <button
+                      key={d}
+                      onClick={() => setAnalyticsWindow(d)}
+                      aria-pressed={active}
+                      className={`rounded-md px-3 py-1 text-xs font-medium transition-all duration-200 ${
+                        active
+                          ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
+                          : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
+                      }`}
+                    >
+                      {d}d
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <HabitAnalytics
+              refreshKey={analyticsKey}
+              userId={userId}
+              windowDays={analyticsWindow}
+            />
+          </>
+        )}
         </>)}
 
         {/* To-do tab content */}
@@ -1063,7 +1122,7 @@ function SectionContainer({
       onDragOver={onHabitDragOver}
       onDragLeave={onHabitDragLeave}
       onDrop={onHabitDrop}
-      className={`relative overflow-hidden rounded-xl border shadow-sm transition-all duration-200 ${
+      className={`relative flex h-full flex-col overflow-hidden rounded-2xl border shadow-sm transition-all duration-200 ${
         isDragOver
           ? 'border-zinc-400 bg-zinc-50/50 shadow-md dark:border-zinc-500 dark:bg-zinc-800/30'
           : isSectionDragged
@@ -1250,6 +1309,7 @@ function HabitCard({
   onDragStart,
   onDragEnd,
   isLoading,
+  userId,
 }: {
   habit: Habit;
   done: boolean;
@@ -1259,7 +1319,38 @@ function HabitCard({
   onDragStart: (e: React.DragEvent) => void;
   onDragEnd: () => void;
   isLoading: boolean;
+  userId?: string | null;
 }) {
+  // Per-habit 30-day history expansion state — "lazy": the grid only
+  // fetches data when the user first opens it. While closed we keep
+  // `historyData` cached so re-opens are instant; closing does NOT
+  // discard the cache.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyData, setHistoryData] = useState<Array<{ date: string; completed: boolean }> | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  async function toggleHistory() {
+    if (historyOpen) {
+      setHistoryOpen(false);
+      return;
+    }
+    if (!historyData && !historyLoading) {
+      setHistoryOpen(true);
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const result = await getHabitCompletionHistory(habit.id, 30, userId);
+        setHistoryData(result);
+      } catch (err) {
+        setHistoryError(err instanceof Error ? err.message : 'Failed to load history');
+      } finally {
+        setHistoryLoading(false);
+      }
+    } else {
+      setHistoryOpen(true);
+    }
+  }
   return (
     <div
       draggable
@@ -1340,7 +1431,152 @@ function HabitCard({
             ✓ Done
           </span>
         )}
+
+        {/* History toggle — always visible so the user can find it. While
+            disabled (no userId signed in), hide it entirely. */}
+        {userId && (
+          <button
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              void toggleHistory();
+            }}
+            onDragStart={(e) => e.preventDefault()}
+            title={historyOpen ? 'Hide 30-day history' : 'Show 30-day history'}
+            aria-label={`Toggle 30-day history for ${habit.name}`}
+            aria-expanded={historyOpen}
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all duration-200 ${
+              historyOpen
+                ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:ring-emerald-900'
+                : 'text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            {/* Bars 3 — small 14×14 chart icon */}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3v18h18" />
+              <path d="M7 14h2v4H7z" />
+              <path d="M11 10h2v8h-2z" />
+              <path d="M15 6h2v12h-2z" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      {/* History grid — smooth expand/collapse using the same
+          max-h + opacity pattern as the section collapses. */}
+      <div
+        className={`overflow-hidden transition-all duration-300 ease-in-out ${
+          historyOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'
+        }`}
+        aria-hidden={!historyOpen}
+        draggable={false}
+        onDragStart={(e) => e.preventDefault()}
+      >
+        <HabitHistory
+          days={30}
+          loading={historyLoading}
+          error={historyError}
+          data={historyData}
+        />
       </div>
     </div>
   );
+}
+
+// ─── Habit History ────────────────────────────────────────────────
+
+/**
+ * Compact 30-day completion grid for a single habit.
+ * Renders 6 columns × 5 rows = 30 squares. Each square's `date` is
+ * passed to the native `title` attribute so hover/tap shows the date
+ * and completion state as a lightweight browser tooltip.
+ *
+ * The component itself is purely presentational — the parent owns the
+ * fetch lifecycle (so a toggle re-fetch on every open would not be
+ * surprising).
+ */
+function HabitHistory({
+  days,
+  loading,
+  error,
+  data,
+}: {
+  days: number;
+  loading: boolean;
+  error: string | null;
+  data: Array<{ date: string; completed: boolean }> | null;
+}) {
+  const cells = data ?? Array.from({ length: days });
+
+  return (
+    <div
+      className="border-t border-zinc-100 px-3 py-3 dark:border-zinc-800"
+      role="region"
+      aria-label="Last 30 days of habit completion"
+    >
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+          Last {days} days
+        </span>
+        {loading && (
+          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+            Loading…
+          </span>
+        )}
+        {!loading && error && (
+          <span className="text-[10px] text-red-500 dark:text-red-400">
+            Failed to load
+          </span>
+        )}
+      </div>
+
+      <div
+        className="grid gap-1"
+        style={{ gridTemplateColumns: `repeat(${days / 5}, minmax(0, 1fr))` }}
+        role="grid"
+      >
+        {cells.map((cell, i) => {
+          const isPlaceholder = !data;
+          const completed = !isPlaceholder && cell.completed;
+          return (
+            <div
+              key={isPlaceholder ? `ph-${i}` : cell.date}
+              title={
+                isPlaceholder
+                  ? 'Loading…'
+                  : `${formatHistoryDate(cell.date)} — ${cell.completed ? 'Completed' : 'Not completed'}`
+              }
+              aria-label={
+                isPlaceholder
+                  ? 'Loading'
+                  : `${cell.date}: ${cell.completed ? 'completed' : 'not completed'}`
+              }
+              className={`aspect-square rounded-md transition-colors duration-200 ${
+                isPlaceholder
+                  ? 'animate-pulse bg-zinc-100 dark:bg-zinc-800'
+                  : completed
+                    ? 'bg-emerald-400 dark:bg-emerald-500'
+                    : 'bg-zinc-100 dark:bg-zinc-800'
+              }`}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Format a YYYY-MM-DD as e.g. "Jul 12, 2026" for the hover tooltip. */
+function formatHistoryDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
