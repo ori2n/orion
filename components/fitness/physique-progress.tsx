@@ -21,25 +21,23 @@ import PhysiqueGallery from './physique-gallery';
 /**
  * PhysiqueProgress — the dashboard-level Physique surface.
  *
- * New shape (ORION rewrite):
- *   1. **Compact "Latest" card** — 64×64 thumbnail on the left,
- *      date + title + featured indicator on the right, two primary
- *      actions (Open Gallery + View Timeline). Reads the SAME cover
- *      pin state the gallery uses (`pickLatestPinnedCover`), so the
- *      two thumbnails are visually guaranteed to match.
- *   2. **Inline horizontal timeline** (always visible, scroll
- *      sideways if many sessions). Click a tile to expand an
- *      inline session-detail panel below the strip.
- *   3. **Inline upload flow** — "+ Add Progress" toggles the
- *      session-first upload flow.
- *   4. **Optimistic mutations** — every mutation (star / cover /
- *      session edit) updates local state immediately, then awaits
- *      the Supabase roundtrip. On failure, the previous state is
- *      restored and a one-liner flash toast surfaces the error.
- *      This component NEVER calls `onSaved` for purely-local
- *      mutations — bumping the dashboard's `refreshKey` would
- *      force WorkoutLog / StrengthProgress / WeightTracking /
- *      SleepTracking to refetch uselessly.
+ * Shape:
+ *   1. **Tall portrait "Latest" hero** on the LEFT — full-bleed photo,
+ *      aspect 4:5 so it's portrait-but-not-extreme.
+ *   2. **Vertical 2×3 photo grid** on the RIGHT — six latest session
+ *      covers, aspect-[3/4] per cell so portrait physique photos aren't
+ *      cropped top/bottom.
+ *   3. **Deep-link from snapshot** — clicking the LatestCard asks the
+ *      timeline to scroll its matching cell into view AND pulse a
+ *      rose ring for ~2.2 s, so the user can see that session in
+ *      context.
+ *   4. **Action row** — Quick comparison + Open Gallery + Add
+ *      Progress.
+ *   5. **Optimistic mutations** — every mutation (star / cover /
+ *      session edit) updates local state immediately, then awaits the
+ *      Supabase roundtrip. On failure, the previous state is restored
+ *      and a one-liner flash toast surfaces the error. Star / unstar
+ *      never triggers a page reload.
  */
 export default function PhysiqueProgress({
   userId,
@@ -55,6 +53,15 @@ export default function PhysiqueProgress({
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [quickCompareIds, setQuickCompareIds] = useState<string[] | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  /**
+   * Drives programmatic deep-linking from the dashboard "Latest"
+   * hero into the timeline. Setting this to a session date asks the
+   * timeline to scroll that cell into view AND pulse a rose ring
+   * around it for ~2 s. Consumed by the timeline via
+   * `onHighlightConsumed` so it only fires once per click.
+   */
+  const [timelineHighlightDate, setTimelineHighlightDate] =
+    useState<string | null>(null);
   /** Inline flash message at the top of the section; auto-clears after 6 s. */
   const [flash, setFlash] = useState<{ kind: 'error' | 'info'; text: string; key: number } | null>(null);
 
@@ -68,8 +75,6 @@ export default function PhysiqueProgress({
       void reload();
       return;
     }
-    // Subsequent refreshKey bumps are deliberate refresh signals
-    // from the parent (e.g., a settings change). Refresh then.
     void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
@@ -92,12 +97,6 @@ export default function PhysiqueProgress({
   );
 
   // ─── Optimistic mutation infrastructure ────────────────────────
-  //
-  // Children call this when a mutation fires. We:
-  //   1. Snapshot the current photos array (closure capture).
-  //   2. Apply the optimistic state change.
-  //   3. Await the underlying Supabase call.
-  //   4. On failure, restore the snapshot AND show a flash toast.
   const applyPhotosChange = useCallback(
     (updater: (prev: HydratedPhoto[]) => HydratedPhoto[]) => {
       setAllPhotos(updater);
@@ -105,31 +104,9 @@ export default function PhysiqueProgress({
     [],
   );
 
-  // Wrap a mutation with snapshot+revert logic. Children pass the
-  // optimistic updater and the async function to call. Any failure
-  // reverts and surfaces an inline flash.
-  async function runOptimistic(args: {
-    optimistic: (prev: HydratedPhoto[]) => HydratedPhoto[];
-    asyncFn: () => Promise<boolean>;
-    failureText: string;
-  }): Promise<boolean> {
-    let before: HydratedPhoto[] | null = null;
-    setAllPhotos((prev) => {
-      before = prev;
-      return args.optimistic(prev);
-    });
-    const ok = await args.asyncFn();
-    if (!ok) {
-      if (before) setAllPhotos(() => before as HydratedPhoto[]);
-      showFlash('error', args.failureText);
-    }
-    return ok;
-  }
-
   const showFlash = useCallback(
     (kind: 'error' | 'info', text: string) => {
       setFlash({ kind, text, key: Date.now() });
-      // Auto-clear is also done in the useEffect below.
     },
     [],
   );
@@ -141,7 +118,7 @@ export default function PhysiqueProgress({
     return () => window.clearTimeout(t);
   }, [flash]);
 
-  // ─── Quick compare entrypoint (unchanged semantically) ─────────
+  // ─── Quick compare entrypoint ─────────────────────────────────
   function openQuickCompare() {
     const candidates = allPhotos.filter((p) => p.is_favourited);
     const pool = candidates.length >= 2 ? candidates : allPhotos;
@@ -157,10 +134,19 @@ export default function PhysiqueProgress({
   // ─── Handle uploads ──────────────────────────────────────────
   async function handleUploadSaved() {
     setUploadOpen(false);
-    // Adding photos IS cross-section data — refresh the whole
-    // dashboard's refreshKey. (Local state update would suffice,
-    // but bumping upstream feels safer given future modules.)
     onSaved();
+  }
+
+  /**
+   * Deep-link entrypoint for the Latest hero. Asks the timeline to
+   * scroll into view and highlight the session containing the
+   * latest photo. The timeline mirrors the signal back via
+   * `onHighlightConsumed`, which clears the prop so re-renders
+   * don't keep retriggering the highlight.
+   */
+  function focusTimelineOnSession(takenAt: string) {
+    if (!takenAt) return;
+    setTimelineHighlightDate(takenAt);
   }
 
   if (loading) {
@@ -173,12 +159,13 @@ export default function PhysiqueProgress({
 
   return (
     <div className="space-y-6">
-      {/* ── Compact "Latest Physique" card ───────────────── */}
+      {/* ── Physique Section ─────────────────────────────────── */}
       <section
         aria-label="Physique"
-        className="rounded-2xl border border-zinc-800/60 bg-zinc-900/45 p-5 shadow-sm backdrop-blur-sm"
+        className="rounded-2xl border border-zinc-800/60 bg-zinc-900/45 p-1.5 shadow-sm backdrop-blur-sm"
       >
-        <div className="mb-4 flex items-center justify-between">
+        {/* Section header */}
+        <div className="mb-1 flex items-center justify-between">
           <div>
             <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
               Physique
@@ -195,32 +182,42 @@ export default function PhysiqueProgress({
           </button>
         </div>
 
-        {latest ? (
-          <LatestCard photo={latest} />
-        ) : (
-          <EmptyLatestCard onAddUpdate={() => setUploadOpen(true)} />
-        )}
+        {/* ── Two-column layout: tall snapshot LEFT, 2×3 timeline grid RIGHT ── */}
+        <div className="grid grid-cols-1 gap-1 lg:grid-cols-[5fr_7fr] lg:items-start lg:gap-2">
+          {latest ? (
+            <LatestCard
+              photo={latest}
+              sessionPhotoCount={
+                sessions.find((s) => s.taken_at === latest.taken_at)?.count ?? 1
+              }
+              onActivate={() => focusTimelineOnSession(latest.taken_at)}
+            />
+          ) : (
+            <EmptyLatestCard onAddUpdate={() => setUploadOpen(true)} />
+          )}
 
-        {/* Two primary actions: Open Gallery + View Timeline. The */}
-        {/* timeline is already visible below; "View Timeline"    */}
-        {/* scrolls the section into view (smooth, no jump).      */}
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-zinc-800/60 pt-4">
+          {/* Timeline — vertical 2×3 grid of session cover thumbs. */}
+          <div
+            id="physique-timeline"
+            aria-label="Latest progress photos"
+          >
+            <PhysiqueTimeline
+              photos={allPhotos}
+              highlightedDate={timelineHighlightDate}
+              onHighlightConsumed={() => setTimelineHighlightDate(null)}
+              onOpenSessionInGallery={() => setGalleryOpen(true)}
+            />
+          </div>
+        </div>
+
+        {/* ── Action row (Open Gallery + Quick compare) ─────────── */}
+        <div className="mt-1 flex flex-wrap gap-2 border-t border-zinc-800/60 pt-1">
           <button
             onClick={openQuickCompare}
             disabled={allPhotos.length < 2}
             className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Quick comparison
-          </button>
-          <button
-            onClick={() => {
-              document
-                .getElementById('physique-timeline')
-                ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }}
-            className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-          >
-            View timeline
           </button>
           <button
             onClick={() => setGalleryOpen(true)}
@@ -232,7 +229,7 @@ export default function PhysiqueProgress({
 
         {/* Inline upload flow */}
         {uploadOpen && (
-          <div className="mt-4">
+          <div className="mt-1">
             <PhysiqueUploadFlow
               userId={userId}
               onError={(msg) => showFlash('error', msg)}
@@ -243,7 +240,7 @@ export default function PhysiqueProgress({
         )}
       </section>
 
-      {/* ── Inline flash toast ─────────────────────────────── */}
+      {/* ── Inline flash toast ─────────────────────────────────── */}
       {flash && (
         <div
           key={flash.key}
@@ -265,16 +262,7 @@ export default function PhysiqueProgress({
         </div>
       )}
 
-      {/* ── Always-visible horizontal timeline ─────────────── */}
-      <section id="physique-timeline" aria-label="Featured timeline">
-        <PhysiqueTimeline
-          photos={allPhotos}
-          onPhotosChanged={applyPhotosChange}
-          showToast={(text) => showFlash('error', text)}
-        />
-      </section>
-
-      {/* ── Gallery modal ──────────────────────────────────── */}
+      {/* ── Gallery modal ──────────────────────────────────────── */}
       {galleryOpen && (
         <PhysiqueGallery
           photos={allPhotos}
@@ -293,66 +281,112 @@ export default function PhysiqueProgress({
   );
 }
 
-// ─── Compact LatestCard (replaces the old big 16:9 hero) ─────────
+// ─── Tall LatestCard hero (full image + overlay text) ────────────
 
-function LatestCard({ photo }: { photo: HydratedPhoto }) {
+function LatestCard({
+  photo,
+  sessionPhotoCount,
+  onActivate,
+}: {
+  photo: HydratedPhoto;
+  sessionPhotoCount: number;
+  onActivate: () => void;
+}) {
   const label = photo.pose_type ?? 'Photo';
   const featuredBadge = photo.is_favourited ? '⭐ Featured' : 'Latest';
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
-      {/* 64×64 thumbnail on the left */}
-      <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-black">
+    <button
+      type="button"
+      onClick={onActivate}
+      className="group relative block h-full w-full aspect-[4/5] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-900/60 text-left transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-zinc-600 hover:shadow-2xl hover:shadow-black/50 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+      aria-label={`Open timeline at ${photo.taken_at} (${
+        photo.session_title ?? 'Untitled session'
+      })`}
+    >
+      {/* Full image */}
+      <div className="absolute inset-0">
         {photo.url ? (
           /* eslint-disable-next-line @next/next/no-img-element */
           <img
             src={photo.url}
-            alt={`Latest featured progress — ${photo.taken_at}`}
-            className="h-full w-full object-cover"
+            alt={`Latest progress — ${photo.taken_at}`}
+            className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-[1.03]"
             loading="lazy"
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-[10px] text-zinc-600">
+          <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
             loading…
           </div>
         )}
       </div>
-      {/* Info column */}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="rounded-md bg-zinc-800/70 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-300">
-            {label}
-          </span>
-          <span className="font-mono text-xs text-zinc-300">
-            {photo.taken_at}
-          </span>
+      {/* Gradient for legibility */}
+      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
+      {/* Featured chip (top right) */}
+      {photo.is_favourited && (
+        <div className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-rose-500/90 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white shadow-lg shadow-rose-900/40 backdrop-blur">
+          ★ Featured
+        </div>
+      )}
+      {/* Pose / session-count chip (top left) */}
+      <div className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-white backdrop-blur">
+        <span>{label}</span>
+        <span className="text-white/60">·</span>
+        <span>
+          {sessionPhotoCount === 1
+            ? 'Solo'
+            : `${sessionPhotoCount} photos`}
+        </span>
+      </div>
+      {/* Overlay footer (title + date + open hint) */}
+      <div className="absolute inset-x-0 bottom-0 flex flex-col gap-1 p-4 text-white">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-300/80">
+          Progress session
+        </div>
+        <div className="line-clamp-2 text-xl font-bold tracking-tight">
+          {photo.session_title ?? (
+            <span className="italic text-zinc-300">Untitled session</span>
+          )}
+        </div>
+        <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-200">
+          <span className="font-mono">{photo.taken_at}</span>
           {photo.body_weight_kg && (
-            <span className="text-[10px] text-zinc-500">
-              · {photo.body_weight_kg}kg
+            <span className="rounded-full bg-zinc-900/60 px-2 py-0.5">
+              {photo.body_weight_kg}kg
             </span>
           )}
         </div>
-        <div className="mt-0.5 truncate text-[11px] font-medium text-zinc-200">
-          {photo.session_title ?? <span className="italic text-zinc-500">Untitled session</span>}
+        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-zinc-300/90">
+          <span>{featuredBadge}</span>
+          <span aria-hidden className="text-rose-300/70">
+            ·
+          </span>
+          <span className="transition-colors group-hover:text-white">
+            View in timeline →
+          </span>
         </div>
-        <div className="mt-0.5 text-[10px] text-zinc-500">{featuredBadge}</div>
       </div>
-    </div>
+    </button>
   );
 }
 
 function EmptyLatestCard({ onAddUpdate }: { onAddUpdate: () => void }) {
   return (
-    <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-8 text-center">
-      <div className="mx-auto mb-2 inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
+    <div
+      className="flex aspect-[4/5] h-full w-full flex-col items-center justify-center rounded-3xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-10 text-center"
+    >
+      <div className="mx-auto mb-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
         <CameraIcon />
       </div>
-      <h4 className="text-sm font-semibold text-zinc-100">No progress photos yet</h4>
-      <p className="mt-1 text-[11px] text-zinc-500">
-        Add your first progress session — front / side / back, all on the same day, with optional notes.
+      <h4 className="text-base font-semibold text-zinc-100">
+        No progress photos yet
+      </h4>
+      <p className="mt-1.5 max-w-[28ch] text-[11px] text-zinc-500">
+        Add your first progress session — front / side / back on the
+        same day, with optional notes.
       </p>
       <button
         onClick={onAddUpdate}
-        className="mt-3 inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-500"
+        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-500"
       >
         + Add Progress
       </button>

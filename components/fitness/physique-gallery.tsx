@@ -177,7 +177,15 @@ export default function PhysiqueGallery({
 
   const filteredSessions = useMemo(() => {
     let result = sessions;
-    if (filter === 'starred') result = result.filter((s) => s.is_favourited);
+    if (filter === 'starred') {
+      // Show an album in the ★ tab whenever ANY of its photos is
+      // starred — not only when every photo is starred. Single-photo
+      // starring (the common workflow) was being hidden before this
+      // change, which is what surfaced as "no album" in the UI.
+      result = result.filter((s) =>
+        s.photos.some((p) => p.is_favourited),
+      );
+    }
     const q = query.trim().toLowerCase();
     if (q) {
       // Match date prefix, OR any substring of the title — feels more
@@ -1484,9 +1492,22 @@ function CompareOverlay({
           </button>
           <button
             onClick={onBack}
-            className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            aria-label="Back to library"
           >
-            Back
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
           </button>
         </div>
       </header>
