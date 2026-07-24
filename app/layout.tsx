@@ -41,7 +41,7 @@ export default function RootLayout({
             href="/actions"
             className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
-            Habits
+            Time Management
           </Link>
           <Link
             href="/fitness"
@@ -60,7 +60,12 @@ export default function RootLayout({
             <AuthButton />
           </div>
         </nav>
-        <div className="flex flex-1 overflow-y-auto">
+        {/* flex-1 + min-h-0 lets each route control its own scroll
+            container (e.g. /actions stays fully static, /fitness keeps
+            its own overflow-y-auto). The old `overflow-y-auto` here
+            forced every page to scroll even when the child could have
+            fit without one. */}
+        <div className="flex min-h-0 flex-1 flex-col">
           {children}
         </div>
       </body>

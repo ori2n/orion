@@ -1,0 +1,736 @@
+{
+  "tables": {
+    "accounts": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "name",
+        "type",
+        "balance",
+        "interest_rate",
+        "created_at",
+        "birth_date",
+        "is_jisa",
+        "contribution_ytd",
+        "contribution_year",
+        "updated_at",
+        "is_cumulative",
+        "max_interest_amount"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "name",
+        "type",
+        "balance",
+        "interest_rate",
+        "is_jisa",
+        "birth_date",
+        "contribution_ytd",
+        "contribution_year",
+        "created_at",
+        "updated_at"
+      ],
+      "missing": [],
+      "extra": [
+        "is_cumulative",
+        "max_interest_amount"
+      ]
+    },
+    "activities": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "activity_type",
+        "duration_minutes",
+        "intensity",
+        "calories",
+        "created_at",
+        "notes"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "activity_type",
+        "duration_minutes",
+        "intensity",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": [
+        "calories"
+      ]
+    },
+    "calendar_events": {
+      "expected": true,
+      "inOpenApi": false,
+      "liveColumns": null,
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "title",
+        "start_at",
+        "end_at",
+        "location",
+        "notes",
+        "color",
+        "source",
+        "created_at",
+        "updated_at"
+      ],
+      "fallback": {
+        "inOpenApi": false,
+        "fallbackPresent": false,
+        "error": "Could not find the table 'public.calendar_events' in the schema cache"
+      }
+    },
+    "daily_checkins": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "checkin_date",
+        "sleep_id",
+        "workout_id",
+        "notes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "checkin_date",
+        "sleep_id",
+        "workout_id",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "events": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "type",
+        "payload",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "type",
+        "payload",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "exercises": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "name",
+        "category",
+        "notes",
+        "is_archived",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "name",
+        "category",
+        "notes",
+        "is_archived",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "future_transactions": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "account_id",
+        "age",
+        "description",
+        "amount",
+        "to_account_id",
+        "transfer_mode",
+        "transfer_value",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "account_id",
+        "age",
+        "description",
+        "amount",
+        "to_account_id",
+        "transfer_mode",
+        "transfer_value",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "gym_logs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "exercise",
+        "sets",
+        "reps",
+        "weight",
+        "created_at",
+        "notes"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "exercise",
+        "sets",
+        "reps",
+        "weight",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "habit_completions": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "habit_id",
+        "completed_date",
+        "created_at",
+        "user_id"
+      ],
+      "expectedColumns": [
+        "id",
+        "habit_id",
+        "completed_date",
+        "user_id",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "habits": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "name",
+        "frequency",
+        "created_at",
+        "custom_frequency",
+        "tag_id",
+        "user_id"
+      ],
+      "expectedColumns": [
+        "id",
+        "frequency",
+        "custom_frequency",
+        "tag_id",
+        "user_id",
+        "name",
+        "created_at",
+        "duration_minutes",
+        "priority"
+      ],
+      "missing": [
+        "duration_minutes",
+        "priority"
+      ],
+      "extra": []
+    },
+    "manual_inputs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "energy_level",
+        "stress_level",
+        "soreness_level",
+        "mood",
+        "created_at",
+        "focus_level"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "energy_level",
+        "focus_level",
+        "stress_level",
+        "soreness_level",
+        "mood",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "milestones": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "kind",
+        "title",
+        "description",
+        "achieved_at",
+        "related_data",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "kind",
+        "title",
+        "description",
+        "achieved_at",
+        "related_data",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "nutrition_logs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "water_ml",
+        "caffeine_mg",
+        "creatine_taken",
+        "meal_time",
+        "created_at",
+        "caffeine_time"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "water_ml",
+        "caffeine_mg",
+        "caffeine_time",
+        "creatine_taken",
+        "created_at",
+        "calories",
+        "protein_g"
+      ],
+      "missing": [
+        "calories",
+        "protein_g"
+      ],
+      "extra": [
+        "meal_time"
+      ]
+    },
+    "physique_logs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "photo_url",
+        "bodyweight",
+        "notes",
+        "created_at",
+        "timestamp"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "bodyweight",
+        "photo_url",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": [
+        "timestamp"
+      ]
+    },
+    "physique_photos": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "taken_at",
+        "pose_type",
+        "photo_path",
+        "body_weight_kg",
+        "notes",
+        "created_at",
+        "is_favourited",
+        "featured_at",
+        "session_title",
+        "cover_photo_id"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "taken_at",
+        "pose_type",
+        "photo_path",
+        "body_weight_kg",
+        "notes",
+        "created_at",
+        "session_title",
+        "cover_photo_id",
+        "is_favourited",
+        "featured_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "recovery_logs": {
+      "expected": true,
+      "inOpenApi": false,
+      "liveColumns": null,
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "energy_level",
+        "stress_level",
+        "soreness_level",
+        "notes",
+        "created_at"
+      ],
+      "fallback": {
+        "inOpenApi": false,
+        "fallbackPresent": false,
+        "error": "Could not find the table 'public.recovery_logs' in the schema cache"
+      }
+    },
+    "sleep_entries": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "sleep_date",
+        "bedtime",
+        "wake_time",
+        "hours",
+        "quality",
+        "notes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "sleep_date",
+        "bedtime",
+        "wake_time",
+        "hours",
+        "quality",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "sleep_logs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "sleep_start",
+        "sleep_end",
+        "quality",
+        "notes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "sleep_start",
+        "sleep_end",
+        "quality",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "tags": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "name",
+        "color",
+        "created_at",
+        "user_id"
+      ],
+      "expectedColumns": [
+        "id",
+        "name",
+        "color",
+        "user_id",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "tasks": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "title",
+        "status",
+        "scheduled_for",
+        "duration_minutes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "title",
+        "status",
+        "scheduled_for",
+        "duration_minutes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "training_logs": {
+      "expected": true,
+      "inOpenApi": false,
+      "liveColumns": null,
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "workout_type",
+        "exercise",
+        "weight_lbs",
+        "reps",
+        "rpe",
+        "notes",
+        "created_at"
+      ],
+      "fallback": {
+        "inOpenApi": false,
+        "fallbackPresent": false,
+        "error": "Could not find the table 'public.training_logs' in the schema cache"
+      }
+    },
+    "transactions": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "account_id",
+        "type",
+        "amount",
+        "category",
+        "description",
+        "date",
+        "transfer_to_account_id",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "account_id",
+        "type",
+        "amount",
+        "category",
+        "description",
+        "date",
+        "transfer_to_account_id",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "user_profiles": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "user_id",
+        "birth_date",
+        "created_at",
+        "updated_at"
+      ],
+      "expectedColumns": [
+        "user_id",
+        "birth_date",
+        "created_at",
+        "updated_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "weight_entries": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "weight_kg",
+        "recorded_at",
+        "notes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "weight_kg",
+        "recorded_at",
+        "notes",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "weight_target": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "user_id",
+        "target_kg",
+        "set_at",
+        "notes"
+      ],
+      "expectedColumns": [
+        "user_id",
+        "target_kg",
+        "set_at",
+        "notes"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "workout_logs": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "workout_type",
+        "exercise",
+        "set1_weight",
+        "set1_reps",
+        "set1_failure",
+        "set2_weight",
+        "set2_reps",
+        "set2_failure",
+        "warmup",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "workout_type",
+        "exercise",
+        "set1_weight",
+        "set1_reps",
+        "set1_failure",
+        "set2_weight",
+        "set2_reps",
+        "set2_failure",
+        "warmup",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    },
+    "workout_sets": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "workout_id",
+        "exercise_id",
+        "user_id",
+        "set_order",
+        "weight_kg",
+        "reps",
+        "rpe",
+        "notes",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "workout_id",
+        "exercise_id",
+        "user_id",
+        "set_order",
+        "weight_kg",
+        "reps",
+        "rpe",
+        "notes",
+        "created_at",
+        "working_sets_count"
+      ],
+      "missing": [
+        "working_sets_count"
+      ],
+      "extra": []
+    },
+    "workouts": {
+      "expected": true,
+      "inOpenApi": true,
+      "liveColumns": [
+        "id",
+        "user_id",
+        "name",
+        "performed_at",
+        "notes",
+        "ai_raw_text",
+        "created_at"
+      ],
+      "expectedColumns": [
+        "id",
+        "user_id",
+        "name",
+        "performed_at",
+        "notes",
+        "ai_raw_text",
+        "created_at"
+      ],
+      "missing": [],
+      "extra": []
+    }
+  },
+  "buckets": {
+    "physique-photos": {
+      "expected": true,
+      "present": false,
+      "public": false
+    },
+    "progress-pics": {
+      "expected": true,
+      "present": true,
+      "public": true
+    }
+  }
+}

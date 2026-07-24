@@ -298,7 +298,7 @@ function LatestCard({
     <button
       type="button"
       onClick={onActivate}
-      className="group relative block h-full w-full aspect-[4/5] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-900/60 text-left transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-zinc-600 hover:shadow-2xl hover:shadow-black/50 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+      className="group relative block h-full w-full aspect-[3/2] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-900/60 text-left transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-zinc-600 hover:shadow-2xl hover:shadow-black/50 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
       aria-label={`Open timeline at ${photo.taken_at} (${
         photo.session_title ?? 'Untitled session'
       })`}
@@ -372,7 +372,7 @@ function LatestCard({
 function EmptyLatestCard({ onAddUpdate }: { onAddUpdate: () => void }) {
   return (
     <div
-      className="flex aspect-[4/5] h-full w-full flex-col items-center justify-center rounded-3xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-10 text-center"
+      className="flex aspect-[3/2] h-full w-full flex-col items-center justify-center rounded-3xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-10 text-center"
     >
       <div className="mx-auto mb-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
         <CameraIcon />

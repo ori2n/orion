@@ -7,6 +7,7 @@ import { getHabitCompletionHistory } from '@/lib/analytics';
 import { EventTypes, logEvent } from '@/lib/events';
 import HabitAnalytics from '@/components/habit-analytics';
 import TodoList from '@/components/todo-list';
+import CalendarPanel from '@/components/time-management/calendar-panel';
 
 type Frequency = 'daily' | 'weekly' | 'custom';
 type View = 'today' | 'plan' | 'insights';
@@ -31,20 +32,6 @@ interface Completion {
   id: string;
   habit_id: string;
   completed_date: string;
-}
-
-interface CalendarEvent {
-  id: string;
-  user_id: string;
-  title: string;
-  start_at: string; // ISO 8601
-  end_at: string;   // ISO 8601
-  color?: string | null;
-  location?: string | null;
-  notes?: string | null;
-  source?: string | null;
-  created_at?: string;
-  updated_at?: string;
 }
 
 function today(): string {
@@ -144,21 +131,24 @@ function useNow(): Date | null {
 }
 
 /**
- * Time Management — the dashboard-level page that owns "today".
+ * Time Management — static (non-scrolling) dashboard page that owns
+ * "today".
  *
- * Shape (Phase 1 — foundation):
- *   - Top nav: Today | Plan | Insights.
- *   - Today view: full-width 3-column shell.
- *       LEFT  — calendar panel (today's hour grid placeholder, no events yet)
- *       RIGHT TOP   — habits, with the existing section-grid structure
- *       RIGHT BOTTOM — flexible to-do list
- *   - Plan view: placeholder stub (Phase 4 — AI scheduling from NL)
- *   - Insights view: existing HabitAnalytics surface
+ * Shape:
+ *   - Inline page header (~32 px): 🧭 emoji + "Time Management" title +
+ *     today's date. No sticky chrome.
+ *   - Single full-height grid:
+ *       LEFT  — calendar panel (Day / Week / Month with drag-to-create
+ *               and drag-to-move/resize events)
+ *       RIGHT TOP   — habits card (sections, default-collapsed to fit
+ *                     the viewport)
+ *       RIGHT BOTTOM — to-dos card (overdue / today / tomorrow / upcoming)
  *
- * Phase 2 will replace the calendar placeholder with a real day/week/month
- * calendar + drag/resize; Phase 3 will add duration_minutes / curfew /
- * AVAILABLE/LOCKED/COMPLETED state UI on the right column; Phase 4 will
- * add voice + NL scheduling; Phase 5 will add the todos→calendar drag.
+ * Latest tooling: CalendarPanel handles its own internal scroll for the
+ * day timeline; the habits & to-dos cards also have their own
+ * `flex-1 overflow-y-auto` so an expanded section or a long todo list
+ * scrolls inside those cards. The page itself never produces a
+ * scrollbar on a 900-px-tall viewport.
  */
 export default function ActionsPage() {
   const [tags, setTags] = useState<Tag[]>([]);
@@ -166,12 +156,29 @@ export default function ActionsPage() {
   const [completions, setCompletions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
-  // Top-nav view — drives which main panel renders.
+  // The page is statically laid out to fit the viewport without
+  // page-level scroll. The previously-exposed Today | Plan |
+  // Insights tab switcher has been retired; the bar that held those
+  // tabs has been removed from the page header so the calendar +
+  // habits + todos grid fills the viewport cleanly. Plan and Insights
+  // surfaces remain in the codebase as future-tour placeholders but
+  // are not currently reachable from this route.
+
+  // Top-nav view — drives which main panel renders. Today still
+  // keeps the page statically laid out (no page scroll); Plan and
+  // Insights are reachable but render inside their own scroll
+  // wrapper so they never push the page to scroll either.
   const [view, setView] = useState<View>('today');
 
-  // Analytics refresh trigger
+  // Analytics refresh trigger / window — only meaningful while the
+  // Insights view is mounted, but the state lives at the parent so
+  // a habit toggle in Today view can stay alive when the user later
+  // switches to Insights. We track whether Insights has ever been
+  // mounted so we don't churn `analyticsKey` on routine Today-view
+  // toggles for users who never visit Insights.
   const [analyticsKey, setAnalyticsKey] = useState(0);
   const [analyticsWindow, setAnalyticsWindow] = useState<7 | 14 | 30>(30);
+  const insightsVisitedRef = useRef(false);
 
   // Error state
   const [error, setError] = useState<string | null>(null);
@@ -181,16 +188,12 @@ export default function ActionsPage() {
   const togglingRef = useRef<Set<string>>(new Set());
 
   const [sectionOrder, setSectionOrder] = useState<string[]>(() => loadSectionOrder());
-  // Sections default-collapsed so the Today view fits without scrolling.
-  // The `sectionsClaimedRef` ref below tracks which sections have ALREADY
-  // been auto-collapsed once — sections the user expanded afterwards are
-  // deliberately NOT re-collapsed when subsequent reloads fire.
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    () => new Set(loadSectionOrder()),
-  );
-  const sectionsClaimedRef = useRef<Set<string>>(
-    new Set(loadSectionOrder()),
-  );
+  // Habits sections: AT MOST ONE open at a time, default-collapsed. Stored
+  // as the single `openSection` identifier so opening another section
+  // atomically closes the previous one. Newly-arrived sections are
+  // naturally closed because they don't match `openSection` until the
+  // user clicks them — no ref-claim bookkeeping required.
+  const [openSection, setOpenSection] = useState<string | null>(null);
 
   const [addingInSection, setAddingInSection] = useState<string | null>(null);
   const [inlineName, setInlineName] = useState('');
@@ -283,30 +286,6 @@ export default function ActionsPage() {
     };
   }, [loadData]);
 
-  // Auto-collapse: initially every section is collapsed (set in the
-  // useState lazy initializer above). When `sectionOrder` grows after
-  // `loadData()` resolves — e.g. server returns a new tag — only NEW
-  // section names are folded into the collapsed set. Sections the
-  // user expanded are NOT re-collapsed if a later reload flips
-  // `loading` back to false: the ref acts as a one-shot "we already
-  // touched this section" guard, so re-collapsing paths (delete-restore,
-  // future upload-restore, etc.) respect the current user toggle.
-  useEffect(() => {
-    if (loading) return;
-    const newlySeen: string[] = [];
-    for (const s of sectionOrder) {
-      if (!sectionsClaimedRef.current.has(s)) {
-        sectionsClaimedRef.current.add(s);
-        newlySeen.push(s);
-      }
-    }
-    if (newlySeen.length === 0) return;
-    setCollapsedSections((prev) => {
-      const next = new Set(prev);
-      for (const s of newlySeen) next.add(s);
-      return next;
-    });
-  }, [loading, sectionOrder]);
 
   const now = useNow();
   const todayStr = now
@@ -316,6 +295,18 @@ export default function ActionsPage() {
         day: 'numeric',
       })
     : '';
+
+  // Mark Insights as "visited" the first time the user opens it, so
+  // subsequent Today-view habit toggles start bumping `analyticsKey`
+  // and the next visit to Insights shows fresh data. Lives in an
+  // effect (not in the JSX render body) to keep React's
+  // no-side-effects-during-render rule satisfied. Short-circuits
+  // after the first visit so the effect is a true no-op on the
+  // Today→Insights→Today back-and-forth.
+  useEffect(() => {
+    if (insightsVisitedRef.current) return;
+    if (view === 'insights') insightsVisitedRef.current = true;
+  }, [view]);
 
   function getTagNameById(tagId: string): string | null {
     return tags.find((t) => t.id === tagId)?.name ?? null;
@@ -390,8 +381,9 @@ export default function ActionsPage() {
       void loadData();
       return;
     }
-    setAnalyticsKey((k) => k + 1);
+    if (insightsVisitedRef.current) setAnalyticsKey((k) => k + 1);
   }
+
 
   async function toggleCompletion(habitId: string) {
     if (togglingRef.current.has(habitId)) return;
@@ -426,7 +418,7 @@ export default function ActionsPage() {
           completed_date: today(),
         });
 
-        setAnalyticsKey((k) => k + 1);
+        if (insightsVisitedRef.current) setAnalyticsKey((k) => k + 1);
       } else {
         const { error: upsertError } = await supabase
           .from('habit_completions')
@@ -448,7 +440,6 @@ export default function ActionsPage() {
           completed_date: today(),
         });
 
-        setAnalyticsKey((k) => k + 1);
       }
     } finally {
       togglingRef.current.delete(habitId);
@@ -620,15 +611,17 @@ export default function ActionsPage() {
       saveSectionOrder(next);
       return next;
     });
+    // Drop the open-section pointer if it pointed at the deleted section,
+    // so the next render doesn't try to expand a missing entry. Safe to
+    // call even when `openSection` was already something else.
+    setOpenSection((prev) => (prev === section ? null : prev));
   }
 
   function toggleSection(section: string) {
-    setCollapsedSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(section)) next.delete(section);
-      else next.add(section);
-      return next;
-    });
+    // Single-active-section semantics: opening a section replaces any
+    // previous open section in one atomic update. Toggling the same
+    // section re-collapses it (openSection becomes null).
+    setOpenSection((prev) => (prev === section ? null : section));
   }
 
   function completedToday(habitId: string): boolean {
@@ -637,73 +630,80 @@ export default function ActionsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen w-full bg-zinc-50 dark:bg-zinc-950">
-        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-center py-32">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-zinc-200 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100" />
-          </div>
-        </div>
+      <div className="flex h-full w-full items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-zinc-200 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen w-full bg-zinc-50 dark:bg-zinc-950">
-      {/* ── Top nav (sticky) ───────────────────────────────────── */}
-      <nav className="sticky top-0 z-20 border-b border-zinc-200 bg-white/85 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-950/85">
-        <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-4 py-1.5 sm:px-6">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-rose-500 to-amber-500 text-base">
-              🧭
-            </div>
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">Time</div>
-              <h1 className="text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-                Management
-              </h1>
-            </div>
-          </div>
-
-          {/* View tabs */}
-          <div className="flex gap-1 rounded-xl bg-zinc-100 p-1 dark:bg-zinc-800/80">
-            {(['today', 'plan', 'insights'] as const).map((v) => {
-              const label = v === 'today' ? 'Today' : v === 'plan' ? 'Plan' : 'Insights';
-              const active = view === v;
-              return (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  aria-pressed={active}
-                  className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-all duration-200 ${
-                    active
-                      ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
-                      : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="text-[11px] tabular-nums text-zinc-400 dark:text-zinc-500">
-            {/* Render a stable, non-time-dependent fallback during SSR/first
-                paint so server markup matches client markup. Once useNow()
-                reports a Date, the real formatted date swaps in. */}
-            <span suppressHydrationWarning>{todayStr}</span>
-          </div>
+    // No more sticky top nav bar — the page header below the layout's
+    // chrome is just a single inline row (~28 px). The result is a
+    // fully static page: it never scrolls vertically because the
+    // outer container is `overflow-hidden` and each child panel
+    // (calendar, habits card, todos card) manages its own internal
+    // scroll when its content exceeds its share of the viewport.
+    <div className="flex h-full w-full flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+      {/* ── Inline page header (not sticky) ───────────────────── */}
+      <header className="flex shrink-0 items-center justify-between gap-3 px-3 pt-2 pb-1.5 sm:px-4">
+        <div className="flex items-center gap-2 min-w-0">
+          <span aria-hidden className="text-base leading-none">🧭</span>
+          <h1 className="truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+            Time Management
+          </h1>
         </div>
-      </nav>
+
+        {/* View pills — compact, inline. On view === 'today' the page
+            stays strictly non-scrolling. Plan / Insights render inside
+            their own `overflow-y-auto` wrapper further down so neither
+            of them makes the page itself scroll. */}
+        <div
+          role="group"
+          aria-label="Switch view"
+          className="flex shrink-0 items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 text-[11px] font-medium dark:bg-zinc-800/80"
+        >
+          {(['today', 'plan', 'insights'] as const).map((v) => {
+            const label =
+              v === 'today' ? 'Today' :
+              v === 'plan'   ? 'Plan'  :
+                               'Insights';
+            const active = view === v;
+            return (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                aria-pressed={active}
+                className={`rounded px-2 py-0.5 transition-colors duration-150 ${
+                  active
+                    ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="hidden text-[11px] tabular-nums text-zinc-400 dark:text-zinc-500 sm:block">
+          {/* Render a stable, non-time-dependent fallback during SSR/first
+              paint so server markup matches client markup. Once useNow()
+              reports a Date, the real formatted date swaps in. Hidden on
+              tiny screens so the pills keep room. */}
+          <span suppressHydrationWarning>{todayStr}</span>
+        </div>
+      </header>
 
       {/* ── View content ───────────────────────────────────────── */}
-      <main className="mx-auto max-w-[1600px] px-3 py-1 sm:px-4 sm:py-2">
+      <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col overflow-hidden px-2 pb-2 sm:px-3">
         {view === 'today' && (
           <TodayView
             error={error}
             sectionOrder={sectionOrder}
             habits={habits}
             completions={completions}
-            collapsedSections={collapsedSections}
+            openSection={openSection}
             draggedHabitId={draggedHabitId}
             dragOverSection={dragOverSection}
             draggedSection={draggedSection}
@@ -748,21 +748,34 @@ export default function ActionsPage() {
           />
         )}
 
-        {view === 'plan' && <PlanPlaceholder />}
+        {/* Plan / Insights are wrapped in `h-full overflow-y-auto` so
+            they scroll inside their own box and the page itself never
+            grows a scrollbar. The inner scroll only works because
+            <main> has `flex-1` (which produces a definite height
+            from `app/layout.tsx`'s `min-h-0 flex-1 flex-col` wrapper);
+            don't collapse that height or this scroll silently breaks. */}
+        {view === 'plan' && (
+          <div className="h-full w-full overflow-y-auto">
+            <PlanPlaceholder />
+          </div>
+        )}
 
         {view === 'insights' && (
-          <InsightsView
-            habits={habits}
-            analyticsKey={analyticsKey}
-            analyticsWindow={analyticsWindow}
-            userId={userId}
-            setAnalyticsWindow={setAnalyticsWindow}
-          />
+          <div className="h-full w-full overflow-y-auto">
+            <InsightsView
+              habits={habits}
+              analyticsKey={analyticsKey}
+              analyticsWindow={analyticsWindow}
+              userId={userId}
+              setAnalyticsWindow={setAnalyticsWindow}
+            />
+          </div>
         )}
       </main>
     </div>
   );
 }
+
 
 // ─── Today view (3-column shell) ──────────────────────────────────
 
@@ -771,7 +784,7 @@ function TodayView(props: {
   sectionOrder: string[];
   habits: Habit[];
   completions: Set<string>;
-  collapsedSections: Set<string>;
+  openSection: string | null;
   draggedHabitId: string | null;
   dragOverSection: string | null;
   draggedSection: string | null;
@@ -814,36 +827,77 @@ function TodayView(props: {
   deleteHabit: (id: string) => Promise<void>;
   setError: (msg: string | null) => void;
 }) {
+  // Mutually-exclusive active module. The right column renders exactly
+  // ONE module body (Habits or To-dos) at a time — when its body is
+  // open the module takes `flex-1` and fills the right column; the
+  // other module shrinks to its header bar (~36 px) so the page never
+  // grows a vertical scrollbar. Default 'habits' so the section list
+  // is on screen at first paint.
   return (
-    <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:items-start lg:gap-2">
-      {/* LEFT — Calendar panel */}
-      <CalendarTodayPanel />
+    // The grid inherits the height of the page (`h-full` from <main> +
+    // `flex-1` from this div's parent). On desktop, both columns share
+    // the full vertical space (`lg:items-stretch`), so the calendar
+    // fills its half end-to-end and the right column splits Habits +
+    // Todos evenly. On mobile the grid stacks vertically with each
+    // child self-sized; the right column's `overflow-hidden` + each
+    // card's `flex-1 overflow-y-auto` carry the same no-page-scroll
+    // guarantee.
+    <div className="grid h-full min-h-0 w-full min-w-0 flex-1 grid-cols-1 gap-1.5 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:items-stretch lg:gap-2">
+      {/* LEFT — Calendar panel (largest area, per spec). Self-fetches.
+          The wrapper itself is `h-full min-h-0` so the panel rides the
+          column share independent of `items-stretch` drift. On mobile
+          (grid-cols-1) it caps at 55 vh so the habits + todos below
+          still have visible height; on `lg` the cap is removed and the
+          panel fills the column. The panel's internal day-timeline
+          scrolls inside its own `overflow-y-auto` container. */}
+      <div className="h-full min-h-0 min-w-0 max-h-[55vh] lg:max-h-none">
+        <CalendarPanel />
+      </div>
 
-      {/* RIGHT — Habits + To-dos stacked */}
-      <div className="flex min-w-0 flex-col gap-1.5">
-        {/* Habits card */}
-        <div className="rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          {/* Error banner */}
-          {props.error && (
-            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
-              {props.error}
-              <button
-                onClick={() => props.setError(null)}
-                className="ml-3 font-medium underline underline-offset-2 hover:no-underline"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+      {/* RIGHT — Habits + To-dos stacked in the right column, but
+          MUTUALLY EXCLUSIVE: only the currently-active module renders
+          its body. Both module HEADERS stay always-visible (each
+          ~36 px) so the user can swap with one click. At any moment
+          either Habits is fully open (filling the right column) or
+          To-dos is fully open — never both at the same time. The
+          page itself never scrolls because each module manages its
+          own internal scroll and the inactive one has no body. */}
+      <div className="flex min-h-0 flex-col overflow-hidden">
 
-          {/* Section-based Habits List — single column for compactness in
-              the right rail. Phase 3 can re-introduce a 2-col sub-grid if
-              habit counts ever justify it. */}
-          <div className="space-y-0.5">
+        {/* Habits card — 50/50 stacked with the To-dos card below.
+            Body is always rendered. The Add section button sits
+            flush against the bottom of the section list (no
+            internal mt-1 gap) so vertical space flows naturally
+            into the To-dos card. At most ONE habit section is
+            open at a time (openSection); the smooth expand/collapse
+            animation lives inside SectionContainer. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+              {/* Error banner — sits OUTSIDE the inner scroll wrapper
+                  so it never shrinks the scroll viewport. Compact mb-2
+                  keeps the banner tight on constrained viewports. */}
+              {props.error && (
+                <div className="mb-2 shrink-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
+                  {props.error}
+                  <button
+                    onClick={() => props.setError(null)}
+                    className="ml-3 font-medium underline underline-offset-2 hover:no-underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* Section-based Habits List — single column for compactness
+                  in the right rail. min-h-0 flex-1 overflow-y-auto so an
+                  expanded section scrolls INSIDE this card without ever
+                  growing the page (the page never scrolls). AT MOST ONE
+                  section is open at any time; opening another closes the
+                  previous one. */}
+              <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
             {props.sectionOrder.map((sectionName, idx) => {
               const grouped = props.groupHabitsBySection();
               const sectionHabits = grouped.get(sectionName) ?? [];
-              const isCollapsed = props.collapsedSections.has(sectionName);
+              const isCollapsed = props.openSection !== sectionName;
               const isDragOver = props.dragOverSection === sectionName;
               const isSectionDragged = props.draggedSection === sectionName;
               const isDragOverHere = props.dragOverSectionIdx === idx;
@@ -968,8 +1022,7 @@ function TodayView(props: {
             })}
           </div>
 
-          {/* Add section button */}
-          <div className="mt-1 flex items-center justify-center">
+          {/* Add section button */}            <div className="flex items-center justify-center">
             {props.showNewSection ? (
               <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
                 <input
@@ -1018,219 +1071,19 @@ function TodayView(props: {
           </div>
         </div>
 
-        {/* To-dos card */}
-        <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <TodoList />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Calendar "Today" panel — dynamic, event-driven ───────────────
-//
-// The panel renders an hour grid ONLY when there are real events for
-// today. With zero events (the Phase 1 default before users have
-// created commitments), it renders a compact empty-state card so the
-// left rail doesn't drag the page down with empty vertical scaffolding.
-// When events eventually exist (Phase 2+), the grid fits the actual
-// hour range spanned by the events rather than hard-coding 06:00 → 23:00.
-
-function CalendarTodayPanel() {
-  const liveNow = useNow();
-  const fallbackDate = new Date(0); // 1970-01-01T00:00:00Z — deterministic
-  const now = liveNow ?? fallbackDate;
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
-
-  // Today's events — fetched from Supabase calendar_events if the table
-  // exists, falls back to [] (renders empty-state card) on any error so
-  // a missing migration or failed query does not crash the page.
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const uid = await getCurrentUserId();
-        if (!uid) return;
-        const dayStart = new Date();
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date();
-        dayEnd.setHours(23, 59, 59, 999);
-        const { data, error } = await supabase
-          .from('calendar_events')
-          .select('*')
-          .eq('user_id', uid)
-          .gte('start_at', dayStart.toISOString())
-          .lte('start_at', dayEnd.toISOString())
-          .order('start_at');
-        if (!cancelled && !error && data) setEvents(data as CalendarEvent[]);
-      } catch {
-        /* calendar_events may not exist yet — render empty state */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Compute the hour-range we need to render. With events: clamp to
-  // [min start hour, max end hour] padded by ±1 hour for context, floor
-  // to 06 / ceil to 23 outermost bounds. Without events: don't render
-  // the grid at all — show a compact card instead — so the page height
-  // is determined by the right column instead.
-  const hasEvents = events.length > 0;
-  const HOUR_FLOOR = 6;
-  const HOUR_CEIL = 23;
-  const ROW_H = 31; // py-1 (8) + border-t (1) + min-h-[22] content
-  const GRID_PAD_TOP = 8; // py-2 on the day-grid container
-
-  function eventHour(iso: string): number {
-    const d = new Date(iso);
-    return d.getHours() + d.getMinutes() / 60;
-  }
-  const allHours = hasEvents
-    ? events.flatMap((e) => [eventHour(e.start_at), eventHour(e.end_at)])
-    : [];
-  const minHour = hasEvents
-    ? Math.max(HOUR_FLOOR, Math.floor(Math.min(...allHours, currentHour - 1)))
-    : HOUR_FLOOR;
-  const maxHour = hasEvents
-    ? Math.min(HOUR_CEIL, Math.ceil(Math.max(...allHours, currentHour + 1)))
-    : HOUR_CEIL;
-  const hourRows = hasEvents
-    ? Array.from({ length: maxHour - minHour + 1 }, (_, i) => minHour + i)
-    : [];
-
-  // Live indicator math uses the fitted minHour as its base, not a
-  // hard-coded 6. Only show it inside the rendered grid region.
-  const showLiveLine =
-    liveNow !== null &&
-    hasEvents &&
-    currentHour >= minHour &&
-    currentHour <= maxHour;
-
-  // Compact empty-state card. Replacing 18 hard-coded rows with this
-  // (~110 px) saves ~480 px on the page when there are no events.
-  const emptyState = (
-    <div className="flex flex-col items-center justify-center gap-2 px-4 py-7 text-center">
-      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-100 text-base dark:bg-zinc-800">
-        📅
-      </div>
-      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
-        Free day
-      </p>
-      <p className="max-w-[220px] text-[11px] leading-snug text-zinc-400 dark:text-zinc-500">
-        Add tennis, school, or an appointment to block this time on the calendar.
-      </p>
-      <button
-        type="button"
-        disabled
-        title="Add commitment — coming soon (Phase 2)"
-        className="mt-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-dashed border-zinc-300 px-2.5 py-1 text-[11px] text-zinc-400 opacity-60 dark:border-zinc-700 dark:text-zinc-500"
-      >
-        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-        </svg>
-        Add commitment
-      </button>
-    </div>
-  );
-
-  return (
-    <aside className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      {/* Single-line header: 📅 + date + D/W/M toggle right.
-          Collapsed from the previous 2-line stacked eyebrow + date
-          layout to save ~32 px. */}
-      <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
-        <div className="flex items-center gap-2 min-w-0">
-          <span aria-hidden className="text-sm">📅</span>
-          <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-            <span suppressHydrationWarning>
-              {now.toLocaleDateString('en-US', {
-                weekday: 'short',
-                month: 'short',
-                day: 'numeric',
-              })}
-            </span>
-          </span>
-        </div>
-        <div
-          role="group"
-          aria-label="Calendar view"
-          className="flex items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 text-[11px] font-medium dark:bg-zinc-800"
-        >
-          {(['D', 'W', 'M'] as const).map((v, i) => (
-            <button
-              key={v}
-              aria-pressed={i === 0 ? true : undefined}
-              aria-disabled={i > 0 ? true : undefined}
-              tabIndex={i > 0 ? -1 : 0}
-              title={
-                i === 0
-                  ? 'Day view (active)'
-                  : i === 1
-                    ? 'Week view — coming soon'
-                    : 'Month view — coming soon'
-              }
-              className={`rounded px-1.5 py-0.5 transition-colors duration-150 ${
-                i === 0
-                  ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
-                  : 'text-zinc-400'
-              }`}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Body — empty-state card (no rows) when no events; fitted hour
-          grid (only the rows that contain events + ±1 h padding for
-          context) when events exist. Capped height so the panel never
-          stretches the page. */}
-      <div className="relative flex-1 overflow-hidden">
-        {!hasEvents ? (
-          // Always render the empty-state card; pin min-h-[180px] so the
-          // SSR/first-paint render (regardless of eventsLoading) shares
-          // an identical footprint with the post-load render. No layout
-          // shift, no spinner needed.
-          <div className="min-h-[180px]">{emptyState}</div>
-        ) : (
-          <div className="relative max-h-[420px] overflow-y-auto px-3 py-2">
-            {hourRows.map((h, idx) => (
-              <div
-                key={h}
-                className={`flex items-start gap-3 border-t border-zinc-100 py-1 text-[11px] tabular-nums text-zinc-400 first:border-t-0 dark:border-zinc-800`}
-              >
-                <span className="w-10 shrink-0 pt-0.5">
-                  {String(h).padStart(2, '0')}:00
-                </span>
-                <div className="min-h-[22px] flex-1" />
-              </div>
-            ))}
-
-            {/* Live current-time indicator — sits at the matching row
-                using the fitted minHour as base. */}
-            {showLiveLine && (
-              <div
-                className="pointer-events-none absolute left-3 right-3 flex items-center gap-2"
-                style={{
-                  top: `${
-                    GRID_PAD_TOP +
-                    ((currentHour - minHour) * ROW_H) +
-                    ((currentMinute / 60) * ROW_H)
-                  }px`,
-                }}
-              >
-                <span className="h-2 w-2 rounded-full bg-rose-500 shadow-[0_0_0_4px_rgba(244,63,94,0.18)]" />
-                <span className="h-px flex-1 bg-gradient-to-r from-rose-500/70 to-rose-500/10" />
-              </div>
-            )}
+        {/* To-dos card — 50/50 stacked with the Habits card above.
+            Body is always rendered. TodoList manages its own
+            internal layout and scroll inside its grid of bucket
+            rows; the wrapper just provides an outer overflow
+            guard so a long task list scrolls inside this card
+            rather than growing the page itself. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <TodoList />
           </div>
-        )}
+        </div>
       </div>
-    </aside>
+    </div>
   );
 }
 

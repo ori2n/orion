@@ -3,7 +3,7 @@
 -- All tables include user_id for RLS scoping.
 
 -- 1. Sleep Logs
-CREATE TABLE sleep_logs (
+CREATE TABLE IF NOT EXISTS sleep_logs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   sleep_start TIMESTAMPTZ NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE sleep_logs (
 );
 
 -- 2. Activity Logs
-CREATE TABLE activities (
+CREATE TABLE IF NOT EXISTS activities (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   activity_type TEXT NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE activities (
 );
 
 -- 3. Gym Logs (structured workouts)
-CREATE TABLE gym_logs (
+CREATE TABLE IF NOT EXISTS gym_logs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   exercise TEXT NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE gym_logs (
 );
 
 -- 4. Physique Logs (body measurements & progress photos)
-CREATE TABLE physique_logs (
+CREATE TABLE IF NOT EXISTS physique_logs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   bodyweight DECIMAL(5,2),
@@ -47,7 +47,7 @@ CREATE TABLE physique_logs (
 );
 
 -- 5. Nutrition / Recovery Logs
-CREATE TABLE nutrition_logs (
+CREATE TABLE IF NOT EXISTS nutrition_logs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   water_ml INTEGER DEFAULT 0 CHECK (water_ml >= 0),
@@ -58,7 +58,7 @@ CREATE TABLE nutrition_logs (
 );
 
 -- 6. Manual Inputs (real-time state tracking for AI calibration)
-CREATE TABLE manual_inputs (
+CREATE TABLE IF NOT EXISTS manual_inputs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID DEFAULT auth.uid(),
   energy_level INTEGER NOT NULL CHECK (energy_level >= 1 AND energy_level <= 10),

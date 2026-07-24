@@ -48,19 +48,16 @@ export default function PhysiqueTimeline({
   /** Open the matching session in the gallery. */
   onOpenSessionInGallery?: (takenAt: string) => void;
 }) {
-  // Latest six sessions, oldest-of-six rendered first and the
-  // freshest at the BOTTOM (which inside the 2×3 grid means
-  // bottom‑right).
+  // Latest six sessions, most‑recent rendered FIRST (top of grid) so
+  // the freshest progress is always the most prominent spot.
   const sessions = useMemo(
     () =>
       [...groupPhotosIntoSessions(photos)]
-        .reverse()
-        .slice(-LATEST_COUNT)
+        .slice(0, LATEST_COUNT)
         .filter(
           (s): s is PhysiqueSession & { cover_photo: HydratedPhoto } =>
             Boolean(s.cover_photo),
-        )
-        .slice(0, LATEST_COUNT),
+        ),
     [photos],
   );
 
@@ -161,7 +158,7 @@ function PhotoCell({
       type="button"
       onClick={() => onOpenGallery?.(session.taken_at)}
       aria-label={`Open ${session.taken_at} session in gallery`}
-      className={`group/photo relative block aspect-[3/4] w-full overflow-hidden rounded-xl border bg-black focus:outline-none focus:ring-2 focus:ring-rose-500/40 ${
+      className={`group/photo relative block aspect-square w-full overflow-hidden rounded-xl border bg-black focus:outline-none focus:ring-2 focus:ring-rose-500/40 ${
         localHighlight
           ? 'highlight-pulse border-rose-500'
           : 'border-zinc-800 hover:border-zinc-600'

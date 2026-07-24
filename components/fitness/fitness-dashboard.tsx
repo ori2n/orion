@@ -3,8 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getCurrentUserId } from '@/lib/auth';
-import WorkoutLog from '@/components/fitness/workout-log';
-import StrengthProgress from '@/components/fitness/strength-progress';
+import WorkoutLogSimple from '@/components/fitness/log-workout-simple';
+import StrengthProgressSimple from '@/components/fitness/strength-progress-simple';
 import PhysiqueProgress from '@/components/fitness/physique-progress';
 import WeightTracking from '@/components/fitness/weight-tracking';
 import SleepTracking from '@/components/fitness/sleep-tracking';
@@ -92,10 +92,10 @@ export default function FitnessDashboard() {
 
       <div className="space-y-10">
         {/* 1. Today's Workout — primary CTA / confirmation */}
-        <WorkoutLog userId={userId} refreshKey={refreshKey} onSaved={onSaved} />
+        <WorkoutLogSimple userId={userId} refreshKey={refreshKey} onSaved={onSaved} />
 
         {/* 2. Strength Progress */}
-        <StrengthProgress userId={userId} refreshKey={refreshKey} onSaved={onSaved} />
+        <StrengthProgressSimple userId={userId} refreshKey={refreshKey} />
 
         {/* 3. Physique Timeline */}
         <PhysiqueProgress userId={userId} refreshKey={refreshKey} onSaved={onSaved} />
