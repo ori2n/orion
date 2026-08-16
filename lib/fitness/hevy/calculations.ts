@@ -260,7 +260,9 @@ export async function computeHevyCalculations(
 const MUSCLE_ORDER: string[] = [
   'Chest',
   'Shoulders',
-  'Back',
+  'Upper Back',
+  'Lats',
+  'Lower Back',
   'Biceps',
   'Triceps',
   'Quads',
