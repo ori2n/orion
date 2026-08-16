@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { getCurrentUserId } from '@/lib/auth';
 import WorkoutLogSimple from '@/components/fitness/log-workout-simple';
 import HevyImport from '@/components/fitness/hevy-import';
+import HevyImportHistory from '@/components/fitness/hevy-import-history';
 import StrengthProgressSimple from '@/components/fitness/strength-progress-simple';
 import PhysiqueProgress from '@/components/fitness/physique-progress';
 import WeightTracking from '@/components/fitness/weight-tracking';
@@ -92,8 +93,11 @@ export default function FitnessDashboard() {
       </header>
 
       <div className="space-y-10">
-        {/* 0. Hevy Import — Stage 1 data intake + diagnostics */}
+        {/* 0. Hevy Import — data intake + diagnostics */}
         <HevyImport userId={userId} onSaved={onSaved} />
+
+        {/* 0b. Hevy Import History — Stage 2 provenance, deletion, verification */}
+        <HevyImportHistory userId={userId} refreshKey={refreshKey} />
 
         {/* 1. Today's Workout — primary CTA / confirmation */}
         <WorkoutLogSimple userId={userId} refreshKey={refreshKey} onSaved={onSaved} />

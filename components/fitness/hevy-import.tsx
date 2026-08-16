@@ -152,6 +152,12 @@ function Diagnostics({ result }: { result: HevyImportDiagnostics }) {
         </span>
       </div>
 
+      {result.importedAt && (
+        <div className="mt-1 text-xs text-zinc-500">
+          {formatTime(result.importedAt)}
+        </div>
+      )}
+
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
         <Stat label="Workouts checked" value={String(result.workoutsChecked)} />
         <Stat label="New workouts" value={String(result.workoutsCreated)} />
@@ -164,6 +170,19 @@ function Diagnostics({ result }: { result: HevyImportDiagnostics }) {
             result.dateMin && result.dateMax
               ? `${short(result.dateMin)} → ${short(result.dateMax)}`
               : '—'
+          }
+        />
+        <Stat label="Weight PRs" value={String(result.weightPrs)} />
+        <Stat
+          label="Volume (new)"
+          value={`${result.volumeSincePreviousImport.toLocaleString()} kg`}
+        />
+        <Stat
+          label="Days since prev"
+          value={
+            result.daysSincePreviousImport === null
+              ? '—'
+              : `${result.daysSincePreviousImport} d`
           }
         />
       </dl>
@@ -203,6 +222,17 @@ function short(isoDate: string): string {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
+  });
+}
+
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
   });
 }
 

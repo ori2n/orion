@@ -61,4 +61,55 @@ export interface HevyImportDiagnostics {
   dateMin: string | null;
   dateMax: string | null;
   warnings: string[];
+  /** ISO timestamp when this import ran (null if it failed up-front). */
+  importedAt: string | null;
+  /** Exercises whose heaviest weight rose in this import (new all-time highs). */
+  weightPrs: number;
+  /** Volume (weight × reps, kg) across newly written sets this import. */
+  volumeSincePreviousImport: number;
+  /** Days since the previous completed import (null on first import). */
+  daysSincePreviousImport: number | null;
+}
+
+/** A stored import history row (provenance + diagnostics). */
+export interface HevyImportRecord {
+  id: string;
+  status: 'completed' | 'failed';
+  startedAt: string;
+  completedAt: string | null;
+  workoutsChecked: number;
+  workoutsCreated: number;
+  workoutsUpdated: number;
+  workoutsUnchanged: number;
+  setsProcessed: number;
+  dateMin: string | null;
+  dateMax: string | null;
+  warnings: string[];
+  rawFileName: string | null;
+}
+
+/** Outcome of deleting a specific import. */
+export interface HevyDeleteImportResult {
+  ok: boolean;
+  deletedWorkouts: number;
+  deletedSets: number;
+  error?: string;
+}
+
+/** A single workout with its exercises/sets — for record verification. */
+export interface HevyWorkoutDetail {
+  id: string;
+  title: string | null;
+  sourceStartTime: string;
+  startTime: string | null;
+  exercises: Array<{
+    name: string;
+    orderIndex: number;
+    sets: Array<{
+      setIndex: number;
+      weightKg: number | null;
+      reps: number | null;
+      durationSeconds: number | null;
+    }>;
+  }>;
 }

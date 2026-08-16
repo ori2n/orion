@@ -60,6 +60,8 @@ export async function importHevyCsv(
   fileText: string,
   fileName?: string,
 ): Promise<HevyImportDiagnostics> {
+  const startedAt = new Date().toISOString();
+
   // 1. Parse. Fatal if the file is not recognisable as Hevy CSV.
   const parsed = parseHevyCsv(fileText);
   const fatal = parsed.warnings.find((w) => w.startsWith('Missing required column'));
@@ -76,6 +78,10 @@ export async function importHevyCsv(
       dateMin: null,
       dateMax: null,
       warnings,
+      importedAt: startedAt,
+      weightPrs: 0,
+      volumeSincePreviousImport: 0,
+      daysSincePreviousImport: null,
     };
   }
 
@@ -89,7 +95,7 @@ export async function importHevyCsv(
   // 2. Create the import record up-front so workouts can reference it.
   const { data: importRow, error: importCreateError } = await supabase
     .from('hevy_imports')
-    .insert({ user_id: userId, raw_file_name: fileName ?? null })
+    .insert({ user_id: userId, raw_file_name: fileName ?? null, started_at: startedAt })
     .select('id')
     .single();
 
@@ -106,6 +112,10 @@ export async function importHevyCsv(
       dateMin: null,
       dateMax: null,
       warnings: ['Could not create the import record.'],
+      importedAt: startedAt,
+      weightPrs: 0,
+      volumeSincePreviousImport: 0,
+      daysSincePreviousImport: null,
     };
   }
   const importId = importRow.id as string;
@@ -118,7 +128,7 @@ export async function importHevyCsv(
 
   if (existingError) {
     await markFailed(importId, 'Could not read existing workouts.');
-    return failedDiagnostics(importId, valid.length, warnings);
+    return failedDiagnostics(importId, valid.length, warnings, startedAt);
   }
 
   const existing = new Map<string, ExistingWorkout>();
@@ -145,6 +155,74 @@ export async function importHevyCsv(
   let totalSets = 0;
   for (const w of valid) {
     for (const e of w.exercises) totalSets += e.sets.length;
+  }
+
+  // 2a. Previous completed import → "days since previous import".
+  // 2b. Existing heaviest weight per exercise → "weight PRs" count.
+  //     Best-effort: a failure here only degrades diagnostics, not the import.
+  let daysSincePreviousImport: number | null = null;
+  const existingMaxByName = new Map<string, number>();
+  try {
+    const { data: prevRows } = await supabase
+      .from('hevy_imports')
+      .select('completed_at')
+      .eq('user_id', userId)
+      .eq('status', 'completed')
+      .not('completed_at', 'is', null)
+      .order('completed_at', { ascending: false })
+      .limit(1);
+    const prev = (prevRows as Array<{ completed_at: string }> | null)?.[0];
+    if (prev) {
+      const ms =
+        new Date(startedAt).getTime() - new Date(prev.completed_at).getTime();
+      daysSincePreviousImport = Math.max(0, Math.floor(ms / 86_400_000));
+    }
+
+    const { data: existingExercises } = await supabase
+      .from('hevy_workout_exercises')
+      .select('id, name')
+      .eq('user_id', userId);
+    const { data: existingSets } = await supabase
+      .from('hevy_workout_sets')
+      .select('workout_exercise_id, weight_kg')
+      .eq('user_id', userId);
+    const nameById = new Map<string, string>();
+    for (const ex of (existingExercises ?? []) as Array<{ id: string; name: string }>) {
+      nameById.set(ex.id, ex.name);
+    }
+    for (const s of (existingSets ?? []) as Array<{
+      workout_exercise_id: string;
+      weight_kg: number | null;
+    }>) {
+      if (s.weight_kg === null) continue;
+      const name = nameById.get(s.workout_exercise_id);
+      if (!name) continue;
+      const cur = existingMaxByName.get(name);
+      if (cur === undefined || s.weight_kg > cur) existingMaxByName.set(name, s.weight_kg);
+    }
+  } catch (err) {
+    console.warn('[hevy-import] diagnostics prep error (non-fatal):', err);
+  }
+
+  // 2c. Weight PRs + volume since previous import (from the new data only).
+  let weightPrs = 0;
+  let volumeSincePreviousImport = 0;
+  for (const p of toWrite) {
+    for (const ex of p.parsed.exercises) {
+      let exMax: number | null = null;
+      for (const s of ex.sets) {
+        if (s.weightKg !== null && s.reps !== null) {
+          volumeSincePreviousImport += s.weightKg * s.reps;
+        }
+        if (s.weightKg !== null && (exMax === null || s.weightKg > exMax)) {
+          exMax = s.weightKg;
+        }
+      }
+      if (exMax !== null) {
+        const prevMax = existingMaxByName.get(ex.name);
+        if (prevMax === undefined || exMax > prevMax) weightPrs += 1;
+      }
+    }
   }
 
   try {
@@ -269,11 +347,15 @@ export async function importHevyCsv(
       dateMin,
       dateMax,
       warnings,
+      importedAt: startedAt,
+      weightPrs,
+      volumeSincePreviousImport,
+      daysSincePreviousImport,
     };
   } catch (err) {
     console.warn('[hevy-import] pipeline error:', err);
     await markFailed(importId, err instanceof Error ? err.message : String(err));
-    return failedDiagnostics(importId, valid.length, warnings);
+    return failedDiagnostics(importId, valid.length, warnings, startedAt);
   }
 }
 
@@ -362,6 +444,7 @@ function failedDiagnostics(
   importId: string,
   workoutsChecked: number,
   warnings: string[],
+  startedAt: string,
 ): HevyImportDiagnostics {
   return {
     importId,
@@ -374,5 +457,9 @@ function failedDiagnostics(
     dateMin: null,
     dateMax: null,
     warnings,
+    importedAt: startedAt,
+    weightPrs: 0,
+    volumeSincePreviousImport: 0,
+    daysSincePreviousImport: null,
   };
 }
