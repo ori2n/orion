@@ -6,6 +6,7 @@ import { getCurrentUserId } from '@/lib/auth';
 import WorkoutLogSimple from '@/components/fitness/log-workout-simple';
 import HevyImport from '@/components/fitness/hevy-import';
 import HevyImportHistory from '@/components/fitness/hevy-import-history';
+import HevyExerciseMeta from '@/components/fitness/hevy-exercise-meta';
 import StrengthProgressSimple from '@/components/fitness/strength-progress-simple';
 import PhysiqueProgress from '@/components/fitness/physique-progress';
 import WeightTracking from '@/components/fitness/weight-tracking';
@@ -98,6 +99,9 @@ export default function FitnessDashboard() {
 
         {/* 0b. Hevy Import History — Stage 2 provenance, deletion, verification */}
         <HevyImportHistory userId={userId} refreshKey={refreshKey} />
+
+        {/* 0c. Hevy Exercise Meta — Stage 4 muscle mapping + manual 1RM + metrics */}
+        <HevyExerciseMeta userId={userId} refreshKey={refreshKey} />
 
         {/* 1. Today's Workout — primary CTA / confirmation */}
         <WorkoutLogSimple userId={userId} refreshKey={refreshKey} onSaved={onSaved} />
