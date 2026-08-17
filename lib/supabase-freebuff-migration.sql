@@ -29,9 +29,14 @@
 --   queued → starting → running → ready_for_review → (approved | discarded)
 --                          ├── stopped   (stop command)
 --                          └── failed    (process crashed / non-zero exit)
+----   `completed` is reserved in the CHECK for future non-review flows and
+--   is treated by the UI as equivalent to `ready_for_review`.
 --
--- `completed` is reserved in the CHECK for future non-review flows and
--- is treated by the UI as equivalent to `ready_for_review`.
+-- Realtime: the four tables are added to the `supabase_realtime`
+-- publication (section 5) so the page's `postgres_changes` subscriptions
+-- fire. If you applied an earlier copy of this file before section 5
+-- existed, run section 5 by itself (or re-run this whole file — it is
+-- idempotent) to enable live terminal / status updates.
 -- =====================================================================
 
 
@@ -169,6 +174,42 @@ CREATE POLICY "User owns freebuff commands" ON freebuff_commands
   WITH CHECK (user_id = auth.uid());
 
 
+-- ─── 5. Realtime ─────────────────────────────────────────────────
+-- The ORION page subscribes to `postgres_changes` on these tables for
+-- live status / prompt / terminal updates. Supabase only publishes WAL
+-- changes for tables that are members of the `supabase_realtime`
+-- publication, and new tables are NOT added to it automatically. Each
+-- ADD is guarded so this file stays idempotent (a bare ADD would error
+-- with "relation is already member" on re-run).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime'
+  ) THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+                     AND tablename = 'freebuff_tasks') THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_tasks;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+                     AND tablename = 'freebuff_prompts') THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_prompts;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+                     AND tablename = 'freebuff_terminal_output') THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_terminal_output;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+                     AND tablename = 'freebuff_commands') THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_commands;
+    END IF;
+  END IF;
+END $$;
+
+
 -- ─── Tell PostgREST to reload its schema cache ────────────────────
 NOTIFY pgrst, 'reload schema';
 
@@ -180,3 +221,13 @@ NOTIFY pgrst, 'reload schema';
 --   UNION ALL SELECT 'freebuff_terminal_output',count(*) FROM freebuff_terminal_output
 --   UNION ALL SELECT 'freebuff_commands',       count(*) FROM freebuff_commands;
 --   -- expect 4 rows of 0
+--
+--   -- Realtime publication membership (expect the 4 freebuff_* tables):
+--   SELECT tablename FROM pg_publication_tables
+--   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+--   ORDER BY tablename;
+--
+--   -- RLS is enabled (expect `t` for all 4):
+--   SELECT relname, relrowsecurity FROM pg_class
+--   WHERE relname LIKE 'freebuff\_%' AND relkind = 'r'
+--   ORDER BY relname;
