@@ -5,12 +5,25 @@ import { supabase } from '@/lib/supabase';
 import { getCurrentUserId } from '@/lib/auth';
 import { getHabitCompletionHistory } from '@/lib/analytics';
 import { EventTypes, logEvent } from '@/lib/events';
-import HabitAnalytics from '@/components/habit-analytics';
 import TodoList from '@/components/todo-list';
 import CalendarPanel from '@/components/time-management/calendar-panel';
+import {
+  buildEventFromHabit,
+  createCalendarEvent,
+} from '@/lib/calendar-scheduling';
 
 type Frequency = 'daily' | 'weekly' | 'custom';
-type View = 'today' | 'plan' | 'insights';
+/**
+ * The three top-level systems the Time Management page exposes. They
+ * are deliberately kept as three parallel siblings — there is no
+ * "today overview" that recombines them. Aggregation views (if any are
+ * added later) must layer on top of these, not replace the boundary.
+ *
+ *   calendar → fixed scheduled events, full-height CalendarPanel.
+ *   habits   → recurring behaviours, section list, completions.
+ *   todos    → one-off tasks, the existing TodoList component.
+ */
+type View = 'calendar' | 'habits' | 'todos';
 
 interface Tag {
   id: string;
@@ -164,25 +177,21 @@ export default function ActionsPage() {
   // surfaces remain in the codebase as future-tour placeholders but
   // are not currently reachable from this route.
 
-  // Top-nav view — drives which main panel renders. Today still
-  // keeps the page statically laid out (no page scroll); Plan and
-  // Insights are reachable but render inside their own scroll
-  // wrapper so they never push the page to scroll either.
-  const [view, setView] = useState<View>('today');
-
-  // Analytics refresh trigger / window — only meaningful while the
-  // Insights view is mounted, but the state lives at the parent so
-  // a habit toggle in Today view can stay alive when the user later
-  // switches to Insights. We track whether Insights has ever been
-  // mounted so we don't churn `analyticsKey` on routine Today-view
-  // toggles for users who never visit Insights.
-  const [analyticsKey, setAnalyticsKey] = useState(0);
-  const [analyticsWindow, setAnalyticsWindow] = useState<7 | 14 | 30>(30);
-  const insightsVisitedRef = useRef(false);
+  // Top-nav view — drives which main panel renders. Each tab owns its
+  // full viewport (Calendar fills the day timeline, Habits owns the
+  // section list, Todos owns the bucket rows). The page itself never
+  // scrolls; each system manages its own internal overflow.
+  const [view, setView] = useState<View>('calendar');
 
   // Error state
   const [error, setError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+
+  // Calendar refresh trigger — bumped whenever an event is created via
+  // a cross-system shortcut ("Schedule this habit" / "Add to calendar
+  // from a task"). CalendarPanel watches this and refetches its own
+  // internal data so the new event appears without a hard reload.
+  const [calendarRefreshKey, setCalendarRefreshKey] = useState(0);
 
   // Track loading state per habit to prevent rapid double-submission
   const togglingRef = useRef<Set<string>>(new Set());
@@ -296,18 +305,6 @@ export default function ActionsPage() {
       })
     : '';
 
-  // Mark Insights as "visited" the first time the user opens it, so
-  // subsequent Today-view habit toggles start bumping `analyticsKey`
-  // and the next visit to Insights shows fresh data. Lives in an
-  // effect (not in the JSX render body) to keep React's
-  // no-side-effects-during-render rule satisfied. Short-circuits
-  // after the first visit so the effect is a true no-op on the
-  // Today→Insights→Today back-and-forth.
-  useEffect(() => {
-    if (insightsVisitedRef.current) return;
-    if (view === 'insights') insightsVisitedRef.current = true;
-  }, [view]);
-
   function getTagNameById(tagId: string): string | null {
     return tags.find((t) => t.id === tagId)?.name ?? null;
   }
@@ -381,7 +378,6 @@ export default function ActionsPage() {
       void loadData();
       return;
     }
-    if (insightsVisitedRef.current) setAnalyticsKey((k) => k + 1);
   }
 
 
@@ -418,7 +414,6 @@ export default function ActionsPage() {
           completed_date: today(),
         });
 
-        if (insightsVisitedRef.current) setAnalyticsKey((k) => k + 1);
       } else {
         const { error: upsertError } = await supabase
           .from('habit_completions')
@@ -653,28 +648,30 @@ export default function ActionsPage() {
           </h1>
         </div>
 
-        {/* View pills — compact, inline. On view === 'today' the page
-            stays strictly non-scrolling. Plan / Insights render inside
-            their own `overflow-y-auto` wrapper further down so neither
-            of them makes the page itself scroll. */}
+        {/* Tab pills — three equal-weight systems, no recombination.
+            Each tab owns the entire viewport for its system; the page
+            itself never scrolls. The labels double as quick affordance
+            cues: 📅 for the fixed-schedule Calendar, 🔁 for the
+            recurring-behaviour Habits, ✅ for the one-off To-dos. */}
         <div
-          role="group"
-          aria-label="Switch view"
+          role="tablist"
+          aria-label="Switch system"
           className="flex shrink-0 items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 text-[11px] font-medium dark:bg-zinc-800/80"
         >
-          {(['today', 'plan', 'insights'] as const).map((v) => {
+          {(['calendar', 'habits', 'todos'] as const).map((v) => {
             const label =
-              v === 'today' ? 'Today' :
-              v === 'plan'   ? 'Plan'  :
-                               'Insights';
+              v === 'calendar' ? '📅 Calendar' :
+              v === 'habits'   ? '🔁 Habits'   :
+                                 '✅ To-dos';
             const active = view === v;
             return (
               <button
                 key={v}
+                role="tab"
                 type="button"
                 onClick={() => setView(v)}
-                aria-pressed={active}
-                className={`rounded px-2 py-0.5 transition-colors duration-150 ${
+                aria-selected={active}
+                className={`rounded px-2.5 py-1 transition-colors duration-150 ${
                   active
                     ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
                     : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -697,8 +694,19 @@ export default function ActionsPage() {
 
       {/* ── View content ───────────────────────────────────────── */}
       <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col overflow-hidden px-2 pb-2 sm:px-3">
-        {view === 'today' && (
-          <TodayView
+        {view === 'calendar' && (
+          // Calendar tab owns the entire viewport. The CalendarPanel
+          // fetches its own data and manages its own internal scroll
+          // for the day timeline / week grid / month grid. The wrapper
+          // here just sets `min-h-0` so the panel rides the parent
+          // flex chain without triggering a page scrollbar.
+          <div className="h-full min-h-0 min-w-0 flex-1">
+            <CalendarPanel refreshKey={calendarRefreshKey} />
+          </div>
+        )}
+
+        {view === 'habits' && (
+          <HabitsView
             error={error}
             sectionOrder={sectionOrder}
             habits={habits}
@@ -745,30 +753,19 @@ export default function ActionsPage() {
             toggleCompletion={toggleCompletion}
             deleteHabit={deleteHabit}
             setError={setError}
+            calendarRefreshKeyBump={() => setCalendarRefreshKey((k) => k + 1)}
           />
         )}
 
-        {/* Plan / Insights are wrapped in `h-full overflow-y-auto` so
-            they scroll inside their own box and the page itself never
-            grows a scrollbar. The inner scroll only works because
-            <main> has `flex-1` (which produces a definite height
-            from `app/layout.tsx`'s `min-h-0 flex-1 flex-col` wrapper);
-            don't collapse that height or this scroll silently breaks. */}
-        {view === 'plan' && (
-          <div className="h-full w-full overflow-y-auto">
-            <PlanPlaceholder />
-          </div>
-        )}
-
-        {view === 'insights' && (
-          <div className="h-full w-full overflow-y-auto">
-            <InsightsView
-              habits={habits}
-              analyticsKey={analyticsKey}
-              analyticsWindow={analyticsWindow}
-              userId={userId}
-              setAnalyticsWindow={setAnalyticsWindow}
-            />
+        {view === 'todos' && (
+          // To-dos tab owns the entire viewport. TodoList manages its
+          // own internal layout (bucket rows, scroll inside the grid).
+          // The wrapper just provides an overflow guard so a long list
+          // scrolls inside this card rather than growing the page.
+          <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <TodoList />
+            </div>
           </div>
         )}
       </main>
@@ -777,9 +774,14 @@ export default function ActionsPage() {
 }
 
 
-// ─── Today view (3-column shell) ──────────────────────────────────
+// ─── Habits view (full-height section list) ───────────────────────
+//
+// Owns the Habits tab. Renders only the habits card body — error
+// banner, section list, add-section button. The card fills the
+// entire viewport; its inner scroll wrapper keeps the page itself
+// from scrolling. AT MOST ONE section open at a time.
 
-function TodayView(props: {
+function HabitsView(props: {
   error: string | null;
   sectionOrder: string[];
   habits: Habit[];
@@ -826,52 +828,27 @@ function TodayView(props: {
   toggleCompletion: (id: string) => Promise<void>;
   deleteHabit: (id: string) => Promise<void>;
   setError: (msg: string | null) => void;
+  /**
+   * Called whenever a habit or to-do successfully creates a calendar
+   * event. Bumps the CalendarPanel `refreshKey` so the new event
+   * shows up without a page reload.
+   */
+  calendarRefreshKeyBump: () => void;
 }) {
-  // Mutually-exclusive active module. The right column renders exactly
-  // ONE module body (Habits or To-dos) at a time — when its body is
-  // open the module takes `flex-1` and fills the right column; the
-  // other module shrinks to its header bar (~36 px) so the page never
-  // grows a vertical scrollbar. Default 'habits' so the section list
+  // Habits tab contents. The section list scrolls inside its own
+  // `overflow-y-auto` wrapper so the page itself never grows a
+  // scrollbar. AT MOST ONE habit section is open at a time
+  // (openSection); the smooth expand/collapse animation lives
+  // inside SectionContainer.
   // is on screen at first paint.
   return (
-    // The grid inherits the height of the page (`h-full` from <main> +
-    // `flex-1` from this div's parent). On desktop, both columns share
-    // the full vertical space (`lg:items-stretch`), so the calendar
-    // fills its half end-to-end and the right column splits Habits +
-    // Todos evenly. On mobile the grid stacks vertically with each
-    // child self-sized; the right column's `overflow-hidden` + each
-    // card's `flex-1 overflow-y-auto` carry the same no-page-scroll
-    // guarantee.
-    <div className="grid h-full min-h-0 w-full min-w-0 flex-1 grid-cols-1 gap-1.5 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:items-stretch lg:gap-2">
-      {/* LEFT — Calendar panel (largest area, per spec). Self-fetches.
-          The wrapper itself is `h-full min-h-0` so the panel rides the
-          column share independent of `items-stretch` drift. On mobile
-          (grid-cols-1) it caps at 55 vh so the habits + todos below
-          still have visible height; on `lg` the cap is removed and the
-          panel fills the column. The panel's internal day-timeline
-          scrolls inside its own `overflow-y-auto` container. */}
-      <div className="h-full min-h-0 min-w-0 max-h-[55vh] lg:max-h-none">
-        <CalendarPanel />
-      </div>
-
-      {/* RIGHT — Habits + To-dos stacked in the right column, but
-          MUTUALLY EXCLUSIVE: only the currently-active module renders
-          its body. Both module HEADERS stay always-visible (each
-          ~36 px) so the user can swap with one click. At any moment
-          either Habits is fully open (filling the right column) or
-          To-dos is fully open — never both at the same time. The
-          page itself never scrolls because each module manages its
-          own internal scroll and the inactive one has no body. */}
-      <div className="flex min-h-0 flex-col overflow-hidden">
-
-        {/* Habits card — 50/50 stacked with the To-dos card below.
-            Body is always rendered. The Add section button sits
-            flush against the bottom of the section list (no
-            internal mt-1 gap) so vertical space flows naturally
-            into the To-dos card. At most ONE habit section is
-            open at a time (openSection); the smooth expand/collapse
-            animation lives inside SectionContainer. */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    // Habits tab owns the entire viewport. The card fills it
+    // end-to-end; the inner section list scrolls inside its own
+    // `overflow-y-auto` wrapper so the page itself never grows a
+    // scrollbar. AT MOST ONE habit section is open at a time
+    // (openSection); the smooth expand/collapse animation lives
+    // inside SectionContainer.
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
               {/* Error banner — sits OUTSIDE the inner scroll wrapper
                   so it never shrinks the scroll viewport. Compact mb-2
                   keeps the banner tight on constrained viewports. */}
@@ -1011,6 +988,9 @@ function TodayView(props: {
                               isLoading={props.togglingRef.current.has(habit.id)}
                               userId={props.userId}
                               frequencyLabel={props.frequencyLabel}
+                              onAfterCalendarMutation={() =>
+                                props.calendarRefreshKeyBump()
+                              }
                             />
                           );
                         })
@@ -1070,108 +1050,6 @@ function TodayView(props: {
             )}
           </div>
         </div>
-
-        {/* To-dos card — 50/50 stacked with the Habits card above.
-            Body is always rendered. TodoList manages its own
-            internal layout and scroll inside its grid of bucket
-            rows; the wrapper just provides an outer overflow
-            guard so a long task list scrolls inside this card
-            rather than growing the page itself. */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <TodoList />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Plan placeholder ─────────────────────────────────────────────
-
-function PlanPlaceholder() {
-  return (
-    <div className="mx-auto flex max-w-2xl flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white/60 px-6 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900/40">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-rose-500/10 text-2xl">
-        📝
-      </div>
-      <h3 className="mt-4 text-base font-semibold text-zinc-900 dark:text-zinc-100">
-        Plan
-      </h3>
-      <p className="mt-1 max-w-md text-sm text-zinc-500 dark:text-zinc-400">
-        Natural-language scheduling lands next. Tell ORION what you need to do
-        today and we'll suggest a slot for each item.
-      </p>
-      <div className="mt-6 inline-flex flex-wrap items-center justify-center gap-2 text-[11px] text-zinc-400">
-        <span className="rounded-full bg-zinc-100 px-2 py-1 dark:bg-zinc-800">
-          &quot;Revise Mandarin 30 min before lunch&quot;
-        </span>
-        <span className="rounded-full bg-zinc-100 px-2 py-1 dark:bg-zinc-800">
-          &quot;Gym at 6pm&quot;
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ─── Insights view (existing HabitAnalytics) ───────────────────────
-
-function InsightsView(props: {
-  habits: Habit[];
-  analyticsKey: number;
-  analyticsWindow: 7 | 14 | 30;
-  userId: string | null;
-  setAnalyticsWindow: (n: 7 | 14 | 30) => void;
-}) {
-  return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 sm:p-5">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
-            Insights
-          </div>
-          <h2 className="mt-1 text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            Habit trends
-          </h2>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-            Window
-          </span>
-          <div className="flex gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800">
-            {([7, 14, 30] as const).map((d) => {
-              const active = props.analyticsWindow === d;
-              return (
-                <button
-                  key={d}
-                  onClick={() => props.setAnalyticsWindow(d)}
-                  aria-pressed={active}
-                  className={`rounded-md px-3 py-1 text-xs font-medium transition-all duration-200 ${
-                    active
-                      ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
-                      : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
-                  }`}
-                >
-                  {d}d
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {props.habits.length === 0 ? (
-        <div className="flex items-center justify-center px-4 py-24 text-sm text-zinc-400">
-          Add habits on the Today tab to start collecting insights.
-        </div>
-      ) : (
-        <HabitAnalytics
-          refreshKey={props.analyticsKey}
-          userId={props.userId}
-          windowDays={props.analyticsWindow}
-        />
-      )}
-    </div>
   );
 }
 
@@ -1498,6 +1376,7 @@ function HabitCard({
   isLoading,
   userId,
   frequencyLabel,
+  onAfterCalendarMutation,
 }: {
   habit: Habit;
   done: boolean;
@@ -1509,11 +1388,72 @@ function HabitCard({
   isLoading: boolean;
   userId?: string | null;
   frequencyLabel: (f: Frequency, c: string) => string;
+  /**
+   * Called after the habit card successfully created a calendar_event
+   * via "Schedule this habit". The parent uses it to bump the
+   * CalendarPanel refresh trigger so the new event shows up without
+   * a hard reload.
+   */
+  onAfterCalendarMutation?: () => void;
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyData, setHistoryData] = useState<Array<{ date: string; completed: boolean }> | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+
+  // Stage 9 — explicit "Schedule this habit" form. Default-collapsed.
+  // Inserts a REAL calendar_event row; the habit itself is unchanged.
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleDate, setScheduleDate] = useState(() => today());
+  const [scheduleTime, setScheduleTime] = useState('09:00');
+  const [scheduleDuration, setScheduleDuration] = useState(30);
+  const [scheduleRepeat, setScheduleRepeat] =
+    useState<'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY'>('WEEKLY');
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleFeedback, setScheduleFeedback] = useState<string | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+
+  async function handleSchedule() {
+    setScheduleError(null);
+    setScheduleFeedback(null);
+    setScheduleSaving(true);
+    try {
+      const startISO = `${scheduleDate}T${scheduleTime}:00`;
+      const ev = buildEventFromHabit({
+        habitName: habit.name,
+        habitDurationMinutes: habit.duration_minutes ?? null,
+        startISO,
+        durationMinutes: scheduleDuration,
+        recurrence: scheduleRepeat === 'NONE' ? null : scheduleRepeat,
+      });
+      const result = await createCalendarEvent(ev);
+      if (!result.ok) {
+        setScheduleError(result.error ?? 'Failed to schedule.');
+        return;
+      }
+      setScheduleFeedback(
+        scheduleRepeat === 'NONE'
+          ? 'Added to calendar'
+          : `Added (${scheduleRepeat.toLowerCase()})`,
+      );
+      void logEvent(EventTypes.HABIT_LOG, {
+        habit_id: habit.id,
+        status: 'scheduled',
+        scheduled_for: scheduleDate,
+        calendar_event_id: result.eventId,
+      });
+      // Tell the parent page the calendar data changed so the panel
+      // refreshes without a hard reload.
+      onAfterCalendarMutation?.();
+      // Fold the form back shortly so success isn't lost.
+      window.setTimeout(() => {
+        setScheduleOpen(false);
+        setScheduleFeedback(null);
+      }, 1400);
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
 
   async function toggleHistory() {
     if (historyOpen) {
@@ -1645,6 +1585,38 @@ function HabitCard({
             </svg>
           </button>
         )}
+
+        {userId && (
+          <button
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setScheduleOpen((v) => !v);
+              setScheduleFeedback(null);
+              setScheduleError(null);
+            }}
+            onDragStart={(e) => e.preventDefault()}
+            title="Schedule this habit on the calendar"
+            aria-label={`Schedule ${habit.name} on the calendar`}
+            aria-expanded={scheduleOpen}
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all duration-200 ${
+              scheduleOpen
+                ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-950/30 dark:text-rose-400 dark:ring-rose-900'
+                : 'text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            <svg
+              aria-hidden
+              className="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </button>
+        )}
       </div>
 
       <div
@@ -1661,6 +1633,107 @@ function HabitCard({
           error={historyError}
           data={historyData}
         />
+      </div>
+
+      <div
+        className={`overflow-hidden border-t border-zinc-100 transition-all duration-300 ease-in-out dark:border-zinc-800 ${
+          scheduleOpen ? 'max-h-72 opacity-100' : 'max-h-0 opacity-0'
+        }`}
+        aria-hidden={!scheduleOpen}
+        draggable={false}
+        onDragStart={(e) => e.preventDefault()}
+      >
+        <div className="space-y-2 px-3 py-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              Schedule on calendar
+            </span>
+            {scheduleFeedback && (
+              <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                {scheduleFeedback}
+              </span>
+            )}
+            {scheduleError && (
+              <span className="text-[10px] font-medium text-red-600 dark:text-red-400">
+                {scheduleError}
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Date</span>
+              <input
+                type="date"
+                value={scheduleDate}
+                onChange={(e) => setScheduleDate(e.target.value)}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Time</span>
+              <input
+                type="time"
+                step={900}
+                value={scheduleTime}
+                onChange={(e) => setScheduleTime(e.target.value)}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Minutes</span>
+              <input
+                type="number"
+                min={15}
+                max={480}
+                step={15}
+                value={scheduleDuration}
+                onChange={(e) => setScheduleDuration(Math.max(15, parseInt(e.target.value, 10) || 15))}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Repeat</span>
+              <select
+                value={scheduleRepeat}
+                onChange={(e) => setScheduleRepeat(e.target.value as typeof scheduleRepeat)}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              >
+                <option value="NONE">Once</option>
+                <option value="DAILY">Daily</option>
+                <option value="WEEKLY">Weekly</option>
+                <option value="MONTHLY">Monthly</option>
+              </select>
+            </label>
+          </div>
+          <div className="flex items-center justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setScheduleOpen(false);
+                setScheduleFeedback(null);
+                setScheduleError(null);
+              }}
+              className="rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleSchedule();
+              }}
+              disabled={scheduleSaving || !scheduleDate || !scheduleTime}
+              className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            >
+              {scheduleSaving ? 'Saving…' : 'Schedule'}
+            </button>
+          </div>
+          <p className="text-[10px] text-zinc-500 dark:text-zinc-400">
+            Creates a new calendar event. Your habit and completion history are unchanged.
+          </p>
+        </div>
       </div>
     </div>
   );

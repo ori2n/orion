@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { redirect, notFound } from 'next/navigation';
-import { getCurrentUserId } from '@/lib/auth';
+import { getCurrentUserIdServer } from '@/lib/auth-server';
 import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
 import ExerciseDetailView from '@/components/fitness/exercise-detail-view';
 
@@ -22,7 +22,7 @@ export default async function ExerciseDetailPage({
 }: {
   params: Promise<{ name: string }>;
 }) {
-  const userId = await getCurrentUserId();
+  const userId = await getCurrentUserIdServer();
   if (!userId) redirect('/login');
   const { name } = await params;
   const decoded = decodeURIComponent(name);

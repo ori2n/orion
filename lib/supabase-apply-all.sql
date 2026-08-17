@@ -1372,9 +1372,7 @@ CREATE POLICY "User owns future transactions" ON future_transactions
 --
 -- Additions:
 --   1. habits.duration_minutes — optional estimated duration per habit.
---      The "smart habits" logic (curfew-based AVAILABLE/LOCKED states
---      and live recommendations) reads this column to decide whether a
---      habit fits in the remaining free time before curfew.
+--      Reserved for a future scheduling feature.
 --   2. habits.priority — optional integer 0-3 (0 = no priority, 1 = low,
 --      2 = medium, 3 = high). Drives ordering in the recommendations
 --      banner; higher priority = appears earlier.
@@ -1396,9 +1394,9 @@ ALTER TABLE habits
     CHECK (priority BETWEEN 0 AND 3);
 
 COMMENT ON COLUMN habits.duration_minutes IS
-  'Estimated minutes to complete the habit. Drives curfew fit analysis.';
+  'Optional estimated minutes per habit. Reserved for a future scheduling feature.';
 COMMENT ON COLUMN habits.priority IS
-  '0 = no priority, 1 = low, 2 = medium, 3 = high. Used for recommendation ordering.';
+  'Optional 0-3 priority bucket (0=none, 1=low, 2=medium, 3=high). Reserved for a future scheduling feature.';
 
 -- ─── calendar_events: fixed commitments only ────────────────────────
 

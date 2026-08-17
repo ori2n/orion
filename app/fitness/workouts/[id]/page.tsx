@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { redirect, notFound } from 'next/navigation';
-import { getCurrentUserId } from '@/lib/auth';
+import { getCurrentUserIdServer } from '@/lib/auth-server';
 import { getHevyWorkoutDetail } from '@/lib/fitness/hevy/history';
 import WorkoutDetailView from '@/components/fitness/workout-detail-view';
 
@@ -21,7 +21,7 @@ export default async function WorkoutDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const userId = await getCurrentUserId();
+  const userId = await getCurrentUserIdServer();
   if (!userId) redirect('/login');
   const { id } = await params;
   const detail = await getHevyWorkoutDetail(userId, id);

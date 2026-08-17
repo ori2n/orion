@@ -60,6 +60,15 @@ interface CalendarPanelProps {
    * runs after every successful write.
    */
   onMutate?: () => Promise<void> | void;
+  /**
+   * External "something outside the panel changed" trigger. When this
+   * prop changes value, the panel refetches its own internal data.
+   * Use the parent's `useState` counter to bump it after explicit
+   * cross-system actions (e.g. "Schedule this habit" inserts a new
+   * calendar_event row without going through the panel's own
+   * `handleSave` path).
+   */
+  refreshKey?: number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -189,6 +198,221 @@ function parseRecurrence(s: string | null | undefined): RecurrenceFreq {
   return 'NONE';
 }
 
+// ─── Recurrence expansion + synthetic occurrences ────────────────────
+//
+// A recurring event is stored as ONE row in calendar_events with a
+// JSON `recurrence` payload. To make the calendar feel like Google
+// Calendar we VISUALISE each occurrence as a separate "virtual" event
+// on its date.
+//
+// Virtual occurrences get a `sid` of the form `vrt-${realId}-${YYYYMMDD}`
+// and `isVirtual: true` so the UI + save layer can tell them apart from
+// real, editable events. Dragging / resizing a virtual occurrence writes
+// the change to THE real underlying event row (so the whole recurring
+// series stays in sync), not to a synthetic instance that doesn't
+// exist in the database.
+
+export interface ExpandedEvent extends CalendarEvent {
+  /** Stable per-(real-event, occurrence) id. */
+  sid: string;
+  /** True when this row is a virtual recurring occurrence. */
+  isVirtual: boolean;
+}
+
+const RECURRENCE_LOOKAHEAD_DAYS = 365;
+
+function padDateKey(d: Date): string {
+  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+}
+
+function expandRecurrence(
+  ev: CalendarEvent | ExpandedEvent,
+  viewStart: Date,
+  viewEnd: Date,
+): ExpandedEvent[] {
+  // Virtual occurrences are unique per (realId, day) — never re-expand
+  // them again, otherwise we'd nest infinite virtuals on each pass.
+  if ((ev as ExpandedEvent).isVirtual) {
+    return [ev as ExpandedEvent];
+  }
+  const freq = parseRecurrence(ev.recurrence);
+  if (freq === 'NONE') {
+    return [{ ...ev, sid: `real-${ev.id}`, isVirtual: false }];
+  }
+
+  const out: ExpandedEvent[] = [{
+    ...ev,
+    sid: `real-${ev.id}`,
+    isVirtual: false,
+  }];
+
+  const originalStart = new Date(ev.start_at);
+  const originalEnd = new Date(ev.end_at);
+  const durationMs = originalEnd.getTime() - originalStart.getTime();
+  const hh = originalStart.getHours();
+  const mm = originalStart.getMinutes();
+
+  // Compute the inclusive window we care about: 30 days before the
+  // view start (so a recurrence weeks into the past still shows up
+  // when we drag back into its window) up to (lookahead) past view end.
+  const horizonStart = new Date(viewStart);
+  horizonStart.setDate(horizonStart.getDate() - 30);
+  const horizonEnd = new Date(viewEnd);
+  horizonEnd.setDate(horizonEnd.getDate() + RECURRENCE_LOOKAHEAD_DAYS);
+
+  // WEEKLY also supports multi-day rules — read byweekday out of JSON.
+  let byweekday: Set<number> | null = null;
+  if (freq === 'WEEKLY') {
+    try {
+      const obj = JSON.parse(ev.recurrence ?? '{}');
+      const mapping: Record<string, number> = {
+        SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
+      };
+      if (Array.isArray(obj?.byweekday) && obj.byweekday.length > 0) {
+        const mapped: Array<number | undefined> = obj.byweekday.map(
+          (d: string) => mapping[d],
+        );
+        byweekday = new Set(mapped.filter((n: number | undefined): n is number => typeof n === 'number'));
+      }
+    } catch { /* ignore */ }
+    if (!byweekday || byweekday.size === 0) {
+      byweekday = new Set([originalStart.getDay()]);
+    }
+  }
+
+  const pushVirtual = (cur: Date) => {
+    // Skip dates that exactly equal the original occurrence.
+    if (sameDay(cur, originalStart)) return;
+    // Skip dates that would fall before the original (defensive).
+    if (cur.getTime() < originalStart.getTime()) return;
+    if (cur < horizonStart || cur > horizonEnd) return;
+    const start = new Date(cur);
+    start.setHours(hh, mm, 0, 0);
+    const end = new Date(start.getTime() + durationMs);
+    out.push({
+      ...ev,
+      sid: `vrt-${ev.id}-${padDateKey(cur)}`,
+      isVirtual: true,
+      start_at: start.toISOString(),
+      end_at: end.toISOString(),
+    });
+  };
+
+  if (freq === 'DAILY') {
+    const cur = startOfDay(horizonStart);
+    while (cur <= horizonEnd) {
+      pushVirtual(cur);
+      cur.setDate(cur.getDate() + 1);
+    }
+  } else if (freq === 'WEEKLY' && byweekday) {
+    const cur = startOfDay(horizonStart);
+    while (cur <= horizonEnd) {
+      if (byweekday.has(cur.getDay())) pushVirtual(cur);
+      cur.setDate(cur.getDate() + 1);
+    }
+  } else if (freq === 'MONTHLY') {
+    // Same day-of-month each month, anchored to the original date.
+    const cur = startOfMonth(originalStart);
+    cur.setMonth(cur.getMonth() + 1);
+    while (cur <= horizonEnd) {
+      const occ = new Date(cur);
+      occ.setDate(originalStart.getDate());
+      pushVirtual(occ);
+      cur.setMonth(cur.getMonth() + 1);
+    }
+  }
+
+  return out;
+}
+
+function expandAllForRange(
+  events: CalendarEvent[],
+  viewStart: Date,
+  viewEnd: Date,
+): ExpandedEvent[] {
+  return events.flatMap((e) => expandRecurrence(e, viewStart, viewEnd));
+}
+
+/**
+ * Greedy side-by-side packer for overlapping events on a single day.
+ *
+ * Algorithm: sort events by (start asc, end desc). Walk through them,
+ * keeping an `active` set of previously-placed events whose end-time
+ * is still in the future at current event's start-time.
+ *
+ *   - Drop ended events from active.
+ *   - If active went from non-empty to empty, we've crossed a cluster
+ *     boundary — reset the per-cluster max-cols counter.
+ *   - Pick the lowest column index not taken by `active`. Insert.
+ *   - Track the per-cluster max-cols (`cols`).
+ *
+ * Output: { event.sid → { col, cols, clusterCols } }, where `cols` is
+ * the total column count of the cluster the event belongs to. CSS then
+ * sets `width = (1 / cols) * (100% − gutter%)` and `left = col * that +
+ * gutter%`.
+ */
+const GUTTER_PCT = 14; // % for hour-label gutter in day view
+
+interface OverlapInfo {
+  col: number;
+  cols: number;
+  clusterCols: number;
+}
+
+function layoutOverlappingEvents(
+  events: ExpandedEvent[],
+): Map<string, OverlapInfo> {
+  const out = new Map<string, OverlapInfo>();
+  if (events.length === 0) return out;
+
+  // Sort: earlier start first; longer duration first so a 9-10am
+  // meeting gets col=0 ahead of an 8-8:30am quick call to its left.
+  const sorted = [...events].sort((a, b) => {
+    const sa = new Date(a.start_at).getTime();
+    const sb = new Date(b.start_at).getTime();
+    if (sa !== sb) return sa - sb;
+    const ea = new Date(a.end_at).getTime();
+    const eb = new Date(b.end_at).getTime();
+    if (ea !== eb) return eb - ea;
+    return a.id.localeCompare(b.id);
+  });
+
+  type ActiveCol = { ev: ExpandedEvent; col: number; endMs: number };
+  const active: ActiveCol[] = [];
+
+  // Tracks the column count of the cluster currently being built.
+  let cols = 0;
+
+  for (const ev of sorted) {
+    const startMs = new Date(ev.start_at).getTime();
+    const endMs = new Date(ev.end_at).getTime();
+
+    // Remove events whose end is <= current start (no longer overlap).
+    const remaining: ActiveCol[] = [];
+    for (const a of active) {
+      if (a.endMs > startMs) remaining.push(a);
+    }
+
+    // Cluster boundary: we WERE tracking a non-empty set, and after
+    // removing ended entries it's empty. Reset per-cluster max cols.
+    if (active.length > 0 && remaining.length === 0) {
+      cols = 0;
+    }
+    active.length = 0;
+    active.push(...remaining);
+
+    // Pick the lowest free column index.
+    const taken = new Set(active.map((a) => a.col));
+    let col = 0;
+    while (taken.has(col)) col += 1;
+    active.push({ ev, col, endMs });
+
+    if (col + 1 > cols) cols = col + 1;
+    out.set(ev.sid, { col, cols, clusterCols: cols });
+  }
+  return out;
+}
+
 function clampDateToTimeline(date: Date, minFloor: Date): Date {
   const x = new Date(date);
   if (x.getHours() < HOUR_FLOOR) {
@@ -289,7 +513,11 @@ function useNow(): Date {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function CalendarPanel({ events: propEvents, onMutate: propOnMutate }: CalendarPanelProps = {}) {
+export default function CalendarPanel({
+  events: propEvents,
+  onMutate: propOnMutate,
+  refreshKey,
+}: CalendarPanelProps = {}) {
   // Internal fallback: when the parent doesn't pass events/onMutate, we
   // manage them ourselves. This keeps the component drop-in for callers
   // who just want <CalendarPanel /> with no wiring.
@@ -309,12 +537,24 @@ export default function CalendarPanel({ events: propEvents, onMutate: propOnMuta
       void internalRefetch();
     }
   }, [propEvents === undefined, internalRefetch]);
+  // External-poke refresh: bump `refreshKey` from the parent when
+  // something outside the panel (e.g. habit-card "Schedule this" or
+  // todo-card "Add to calendar") wrote a row the panel couldn't see
+  // through its own mutation path.
+  useEffect(() => {
+    if (propEvents === undefined && refreshKey !== undefined) {
+      void internalRefetch();
+    }
+    // We intentionally depend ONLY on `refreshKey` — the internal
+    // refetch function identity changes won't cause an extra fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   const events = propEvents ?? internalEvents;
   const onMutate = propOnMutate ?? internalRefetch;
   const [view, setView] = useState<View>('day');
   const [anchorDate, setAnchorDate] = useState<Date>(() => startOfDay(new Date()));
-  const [editing, setEditing] = useState<CalendarEvent | null>(null);
+  const [editing, setEditing] = useState<ExpandedEvent | null>(null);
   const [creating, setCreating] = useState<null | {
     title: string;
     startISO: string;
@@ -352,17 +592,43 @@ export default function CalendarPanel({ events: propEvents, onMutate: propOnMuta
         dayEnd.setHours(23, 59, 59, 999);
         return en >= dayStart && s <= dayEnd;
       }
+      // Recurring: include the underlying rule row so DayView can
+      // expand it into virtual occurrences on this day. Virtual rows
+      // themselves are skipped because their `isVirtual` flag makes
+      // `expandRecurrence` a no-op.
+      if (parseRecurrence(e.recurrence) !== 'NONE') {
+        return true;
+      }
+      // Non-recurring single-day events: include if event starts on
+      // anchorDate OR was still ongoing at start of anchorDate.
       return sameDay(s, anchorDate) || (s < anchorDate && en > anchorDate);
     });
   }, [events, anchorDate]);
 
-  const allDayEvents = useMemo(
-    () => dayEvents.filter((e) => e.all_day).sort((a, b) => a.start_at.localeCompare(b.start_at)),
-    [dayEvents],
-  );
+  // All-day events: expand recurring all-day rules so a recurring
+  // multi-day chip (e.g. "spring break") shows on every visible day.
+  // Non-recurring events pass through unchanged; the chip row uses
+  // start_at.date in the chip label.
+  const allDayEvents = useMemo(() => {
+    const allDay = events.filter((e) => e.all_day);
+    const expanded = expandAllForRange(allDay, anchorDate, anchorDate);
+    const dayEnd = new Date(anchorDate);
+    dayEnd.setHours(23, 59, 59, 999);
+    return expanded
+      .filter((e) => {
+        const s = new Date(e.start_at);
+        const en = new Date(e.end_at);
+        return en >= anchorDate && s <= dayEnd;
+      })
+      .sort((a, b) => a.start_at.localeCompare(b.start_at));
+  }, [events, anchorDate]);
+  // Expand recurring rules so dayView/WeekView/MonthView can show
+  // virtual occurrences on each date the rule fires.
   const timedEvents = useMemo(
-    () => dayEvents.filter((e) => !e.all_day).sort((a, b) => a.start_at.localeCompare(b.start_at)),
-    [dayEvents],
+    () =>
+      expandAllForRange(dayEvents.filter((e) => !e.all_day), anchorDate, anchorDate)
+        .sort((a, b) => a.start_at.localeCompare(b.start_at)),
+    [dayEvents, anchorDate],
   );
 
   const handleSaved = useCallback(async () => {
@@ -642,11 +908,11 @@ function DayView({
   onClickEvent,
 }: {
   anchorDate: Date;
-  allDayEvents: CalendarEvent[];
-  timedEvents: CalendarEvent[];
+  allDayEvents: ExpandedEvent[];
+  timedEvents: ExpandedEvent[];
   onCreateRange: (startISO: string, endISO: string) => void;
   onUpdateEvent: (id: string, iso: { start_at: string; end_at: string }) => Promise<void>;
-  onClickEvent: (e: CalendarEvent) => void;
+  onClickEvent: (e: ExpandedEvent) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -807,11 +1073,37 @@ function DayView({
     [anchorDate, onCreateRange, onUpdateEvent],
   );
 
-  // Free-time chips: gaps ≥ 30 min between timed events today
+  // Expand recurring events into virtual occurrences for THIS day.
+  // Non-recurring events pass through unchanged. Recurring events get
+  // virtual rows that render exactly like real ones in the day view.
+  const viewStart = startOfDay(anchorDate);
+  const viewEnd = new Date(viewStart);
+  viewEnd.setHours(23, 59, 59, 999);
+  const expandedTimed = useMemo(
+    () =>
+      expandAllForRange(timedEvents, viewStart, viewEnd).filter((e) => {
+        // Day view shows events whose start lands on this anchorDate OR
+        // spans across it (multi-day timed events).
+        const s = new Date(e.start_at);
+        const en = new Date(e.end_at);
+        return sameDay(s, anchorDate) || (s < viewStart && en > viewStart);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timedEvents, anchorDate],
+  );
+  // Compute side-by-side overlap layout once per render.
+  const overlapLayout = useMemo(
+    () => layoutOverlappingEvents(expandedTimed),
+    [expandedTimed],
+  );
+
+  // Free-time chips: gaps ≥ 30 min between timed events today.
+  // Includes virtual expanded occurrences so the free-time hint
+  // reflects what the user actually sees.
   const freeChips = useMemo(() => {
     if (!isToday) return [];
     const nowMin = minutesFromFloor(now);
-    const sorted = [...timedEvents]
+    const sorted = expandedTimed
       .map((e) => ({
         s: minutesFromFloor(new Date(e.start_at)),
         en: minutesFromFloor(new Date(e.end_at)),
@@ -827,7 +1119,7 @@ function DayView({
     return gaps
       .filter((g) => g.end - g.start >= 60 && g.end > nowMin + 60) // future free time ≥ 1h
       .slice(0, 3); // top 3 — keeps the panel quiet
-  }, [timedEvents, now, isToday]);
+  }, [expandedTimed, now, isToday]);
 
   const liveMin = minutesFromFloor(now);
 
@@ -856,8 +1148,12 @@ function DayView({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUpGrid}
         onPointerCancel={onPointerUpGrid}
-        className="relative flex-1 cursor-crosshair select-none overflow-y-auto"
-        style={{ touchAction: 'none' }}
+        className="relative flex-1 cursor-crosshair select-none overflow-y-auto overscroll-contain"
+        // touch-action=pan-y lets mobile users scroll the timeline
+        // vertically with their thumb while still letting pointer events
+        // drive our drag-to-create + drag-to-move/resize handlers.
+        // (Full `none` would freeze mobile scroll inside the day view.)
+        style={{ touchAction: 'pan-y' }}
       >
         <div className="relative" style={{ height: TIMELINE_HEIGHT_PX, paddingRight: 8 }}>
           {/* Hour markers */}
@@ -884,20 +1180,34 @@ function DayView({
             </div>
           ))}
 
-          {/* Events */}
-          {timedEvents.map((e) => {
+          {/* Events — drawn expanded for recurrence; side-by-side for
+              overlaps inside the same cluster. Virtual occurrences get
+              an `aria-virtual` toggle so a11y tools can tell them apart
+              from the real recurring-rule row. */}
+          {expandedTimed.map((e) => {
             const startMin = Math.max(0, minutesFromFloor(new Date(e.start_at)));
             const endMin = clampMinutes(minutesFromFloor(new Date(e.end_at)));
             const height = Math.max(20, (endMin - startMin) * PX_PER_MIN);
             const preview = dragPreview && dragPreview.id === e.id ? dragPreview : null;
             const top = preview ? preview.top : startMin * PX_PER_MIN;
             const finalHeight = preview ? preview.height : height;
+
+            const overlap = overlapLayout.get(e.sid);
+            const cols = overlap?.cols ?? 1;
+            const colon = cols > 0 ? 100 / cols : 100;
+            const usable = 100 - GUTTER_PCT;
+            const leftPct = GUTTER_PCT + (overlap?.col ?? 0) * colon;
+            const widthPct = colon;
+
             return (
               <DraggableEventBlock
-                key={e.id}
+                key={e.sid}
                 event={e}
                 top={top}
                 height={finalHeight}
+                overlapCols={cols}
+                leftPct={leftPct}
+                widthPct={widthPct}
                 onClick={() => onClickEvent(e)}
                 onPointerDown={(ev, mode) => onPointerDownEvent(ev, e, mode)}
               />
@@ -935,12 +1245,24 @@ function DayView({
 
 function DraggableEventBlock({
   event, top, height, onClick, onPointerDown,
+  overlapCols, leftPct, widthPct,
 }: {
-  event: CalendarEvent;
+  event: ExpandedEvent;
   top: number;
   height: number;
   onClick: () => void;
   onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize') => void;
+  /**
+   * Total columns in the overlap cluster. When 1 (i.e. no overlap),
+   * the block fills the full timeline minus the 14 % hour-gutter.
+   * Higher values mean more sibling events on the same row, so we
+   * shrink to (1 / cols) of the available width.
+   */
+  overlapCols: number;
+  /** Inline `left` in percent of the timeline gutter-relative origin. */
+  leftPct: number;
+  /** Inline `width` in percent of the timeline gutter-relative origin. */
+  widthPct: number;
 }) {
   const colors = PRESET_COLORS.find((c) => c.name === event.color);
   const cls = colors?.cls ?? 'bg-zinc-400 dark:bg-zinc-600';
@@ -948,20 +1270,40 @@ function DraggableEventBlock({
   return (
     <div
       data-event={event.id}
+      data-virtual={event.isVirtual ? '1' : '0'}
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       onPointerDown={(e) => onPointerDown(e, 'move')}
-      className={`group absolute left-12 right-2 cursor-grab overflow-hidden rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
+      aria-label={event.isVirtual ? `Recurring: ${event.title}` : event.title}
+      className={`group absolute cursor-grab overflow-hidden rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
         isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      } ${height < 28 ? 'leading-tight' : ''}`}
-      style={{ top, height }}
+      } ${height < 28 ? 'leading-tight' : ''} ${
+        event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''
+      }`}
+      style={{ top, height, left: `${leftPct}%`, width: `${widthPct}%` }}
     >
-      <div className="truncate leading-tight">{event.title}</div>
+      <div className="flex items-center gap-1">
+        {event.isVirtual && (
+          <svg
+            aria-hidden
+            className="h-2.5 w-2.5 shrink-0 opacity-70"
+            fill="none"
+            viewBox="0 0 24 24"
+            strokeWidth={2.5}
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+          </svg>
+        )}
+        <span className="truncate leading-tight">{event.title}</span>
+      </div>
       {height >= 28 && (
         <div className="truncate text-[10px] opacity-85">
           {fmtHM(new Date(event.start_at))} – {fmtHM(new Date(event.end_at))}
         </div>
       )}
-      {/* Resize handle — bottom 6px */}
+      {/* Resize handle — bottom 6px. Only "real" non-virtual events are
+          editable on the day view; virtual recurring occurrences write
+          back to the underlying real row. */}
       <div
         data-handle="resize"
         onPointerDown={(e) => { e.stopPropagation(); onPointerDown(e, 'resize'); }}
@@ -974,7 +1316,7 @@ function DraggableEventBlock({
 
 // ─── All-day chip ──────────────────────────────────────────────────────────
 
-function AllDayChip({ event, onClick }: { event: CalendarEvent; onClick: () => void }) {
+function AllDayChip({ event, onClick }: { event: ExpandedEvent; onClick: () => void }) {
   const colors = PRESET_COLORS.find((c) => c.name === event.color);
   const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
   const isDark = !event.color;
@@ -988,10 +1330,15 @@ function AllDayChip({ event, onClick }: { event: CalendarEvent; onClick: () => v
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
+      className={`group inline-flex items-center gap-1.5 rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
         isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      }`}
+      } ${event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
     >
+      {event.isVirtual && (
+        <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+        </svg>
+      )}
       <span className="truncate">{event.title}</span>
       <span className="text-[10px] opacity-80">{label}</span>
     </button>
@@ -1005,10 +1352,13 @@ function WeekView({
 }: {
   anchorDate: Date;
   events: CalendarEvent[];
-  onClickEvent: (e: CalendarEvent) => void;
+  onClickEvent: (e: ExpandedEvent) => void;
   onCreateQuick: (date: Date) => void;
 }) {
   const monday = startOfWeek(anchorDate);
+  const sunday = new Date(monday);
+  sunday.setDate(sunday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 999);
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(monday);
     d.setDate(d.getDate() + i);
@@ -1016,6 +1366,14 @@ function WeekView({
   });
   const now = useNow();
   const today = startOfDay(now);
+
+  // Expand recurring events across the full week view so a daily/weekly
+  // habit shows correctly on each weekday's column.
+  const expandedEvents = useMemo(
+    () => expandAllForRange(events, monday, sunday),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, anchorDate],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -1042,9 +1400,9 @@ function WeekView({
           const dayStart = startOfDay(d);
           const dayEnd = new Date(dayStart);
           dayEnd.setHours(23, 59, 59, 999);
-          const dayAllDay = events.filter((e) => e.all_day &&
+          const dayAllDay = expandedEvents.filter((e) => e.all_day &&
             new Date(e.end_at) >= dayStart && new Date(e.start_at) <= dayEnd);
-          const dayTimed = events.filter((e) => !e.all_day && sameDay(new Date(e.start_at), d));
+          const dayTimed = expandedEvents.filter((e) => !e.all_day && sameDay(new Date(e.start_at), d));
           return (
             <div
               key={i}
@@ -1054,7 +1412,7 @@ function WeekView({
               {dayAllDay.length > 0 && (
                 <div className="mb-1.5 space-y-1">
                   {dayAllDay.slice(0, 2).map((e) => (
-                    <WeekChip key={e.id} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
+                    <WeekChip key={e.sid} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
                   ))}
                   {dayAllDay.length > 2 && (
                     <button
@@ -1068,7 +1426,7 @@ function WeekView({
                 </div>
               )}
               {dayTimed.slice(0, 4).map((e) => (
-                <WeekChip key={e.id} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
+                <WeekChip key={e.sid} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
               ))}
               {dayTimed.length > 4 && (
                 <div className="mt-1 text-[10px] text-zinc-500">+{dayTimed.length - 4} more</div>
@@ -1081,7 +1439,7 @@ function WeekView({
   );
 }
 
-function WeekChip({ event, onClick }: { event: CalendarEvent; onClick: (e: React.MouseEvent) => void }) {
+function WeekChip({ event, onClick }: { event: ExpandedEvent; onClick: (e: React.MouseEvent) => void }) {
   const colors = PRESET_COLORS.find((c) => c.name === event.color);
   const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
   const isDark = !event.color;
@@ -1089,11 +1447,18 @@ function WeekChip({ event, onClick }: { event: CalendarEvent; onClick: (e: React
     <button
       type="button"
       onClick={onClick}
-      className={`block w-full truncate rounded ${cls} px-1.5 py-1 text-left text-[10px] font-medium ${
+      className={`group block w-full truncate rounded ${cls} px-1.5 py-1 text-left text-[10px] font-medium ${
         isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      }`}
+      } ${event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
     >
-      <span>{event.title}</span>
+      <span className="inline-flex items-center gap-1">
+        {event.isVirtual && (
+          <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+          </svg>
+        )}
+        <span className="truncate">{event.title}</span>
+      </span>
       {!event.all_day && (
         <span className="ml-1 opacity-80">{fmtHM(new Date(event.start_at))}</span>
       )}
@@ -1108,7 +1473,7 @@ function MonthView({
 }: {
   anchorDate: Date;
   events: CalendarEvent[];
-  onClickEvent: (e: CalendarEvent) => void;
+  onClickEvent: (e: ExpandedEvent) => void;
   onCreateQuick: (date: Date) => void;
   onDayClick: (date: Date) => void;
 }) {
@@ -1133,6 +1498,15 @@ function MonthView({
   const now = useNow();
   const today = startOfDay(now);
 
+  // Expand recurring events across the month — daily events appear on
+  // every day of the grid, weekly events only on byweekday matches,
+  // monthly events on the same day-of-month each month.
+  const expandedEvents = useMemo(
+    () => expandAllForRange(events, gridStart, gridEnd),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, anchorDate],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="grid grid-cols-7 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
@@ -1148,7 +1522,7 @@ function MonthView({
           const dayStart = startOfDay(d);
           const dayEnd = new Date(dayStart);
           dayEnd.setHours(23, 59, 59, 999);
-          const dayEvents = events.filter((e) =>
+          const dayEvents = expandedEvents.filter((e) =>
             new Date(e.end_at) >= dayStart && new Date(e.start_at) <= dayEnd,
           );
           const isToday = sameDay(d, today);
@@ -1174,14 +1548,19 @@ function MonthView({
                   const isDark = !e.color;
                   return (
                     <div
-                      key={e.id}
+                      key={e.sid}
                       role="button"
                       onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }}
-                      className={`cursor-pointer truncate rounded ${cls} px-1 py-0.5 text-[10px] font-medium ${
+                      className={`group/chip flex cursor-pointer items-center gap-1 truncate rounded ${cls} px-1 py-0.5 text-[10px] font-medium ${
                         isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-                      }`}
+                      } ${e.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
                     >
-                      {e.title}
+                      {e.isVirtual && (
+                        <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                        </svg>
+                      )}
+                      <span className="truncate">{e.title}</span>
                     </div>
                   );
                 })}

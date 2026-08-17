@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
-import { getCurrentUserId } from '@/lib/auth';
+import { getCurrentUserIdServer } from '@/lib/auth-server';
 import WorkoutHistoryView from '@/components/fitness/workout-history-view';
 
 export const metadata: Metadata = {
@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function WorkoutsPage() {
-  const userId = await getCurrentUserId();
+  const userId = await getCurrentUserIdServer();
   if (!userId) redirect('/login');
   return <WorkoutHistoryView userId={userId} />;
 }

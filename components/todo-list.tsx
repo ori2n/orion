@@ -3,6 +3,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getTasks, insertTask, toggleTaskStatus, deleteTask as deleteTaskApi, rescheduleTask } from '@/lib/tasks';
 import type { Task } from '@/lib/tasks';
+import {
+  buildEventFromTask,
+  createCalendarEvent,
+} from '@/lib/calendar-scheduling';
 
 // Re-export for backwards compatibility
 /** @deprecated Import from @/lib/tasks instead */
@@ -445,6 +449,43 @@ function TaskCard({
   const isCompleted = task.status === 'completed';
   const isDragging = draggedId === task.id;
 
+  // Stage 9 — explicit "Add to calendar" toggle on each task. Inserts a
+  // REAL calendar_event for the task's scheduled date — the task itself
+  // is never mutated. The two systems stay independent.
+  const [calOpen, setCalOpen] = useState(false);
+  const [calTime, setCalTime] = useState('09:00');
+  const [calDuration, setCalDuration] = useState<number>(task.duration_minutes ?? 30);
+  const [calSaving, setCalSaving] = useState(false);
+  const [calFeedback, setCalFeedback] = useState<string | null>(null);
+  const [calError, setCalError] = useState<string | null>(null);
+
+  async function handleAddToCalendar() {
+    setCalError(null);
+    setCalFeedback(null);
+    setCalSaving(true);
+    try {
+      const ev = buildEventFromTask({
+        taskTitle: task.title,
+        taskDate: task.scheduled_for,
+        taskDurationMinutes: task.duration_minutes ?? null,
+        startTime: calTime,
+        durationMinutes: calDuration,
+      });
+      const result = await createCalendarEvent(ev);
+      if (!result.ok) {
+        setCalError(result.error ?? 'Failed to add to calendar.');
+        return;
+      }
+      setCalFeedback('Added to calendar');
+      window.setTimeout(() => {
+        setCalOpen(false);
+        setCalFeedback(null);
+      }, 1400);
+    } finally {
+      setCalSaving(false);
+    }
+  }
+
   return (
     <div
       draggable
@@ -466,6 +507,7 @@ function TaskCard({
               : 'border-zinc-300 bg-white hover:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:border-zinc-500'
           }`}
           aria-label={isCompleted ? 'Mark as pending' : 'Mark as completed'}
+          onDragStart={(e) => e.stopPropagation()}
         >
           {isCompleted && (
             <svg className="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor">
@@ -503,6 +545,35 @@ function TaskCard({
           <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
         </svg>
 
+        {/* Add to calendar */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setCalOpen((v) => !v);
+            setCalFeedback(null);
+            setCalError(null);
+          }}
+          onDragStart={(e) => e.stopPropagation()}
+          title="Add this task to the calendar (creates a new event)"
+          aria-label={`Add ${task.title} to the calendar`}
+          aria-expanded={calOpen}
+          className={`shrink-0 rounded-md p-0.5 transition-all ${
+            calOpen
+              ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-950/30 dark:text-rose-400 dark:ring-rose-900'
+              : 'text-zinc-200 opacity-0 hover:text-rose-500 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-rose-400'
+          }`}
+        >
+          <svg
+            className="h-3.5 w-3.5"
+            fill="none"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        </button>
+
         {/* Delete */}
         <button
           onClick={() => onDelete(task.id)}
@@ -514,6 +585,94 @@ function TaskCard({
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
+      </div>
+
+      <div
+        className={`overflow-hidden transition-all duration-300 ease-in-out ${
+          calOpen ? 'max-h-60 opacity-100' : 'max-h-0 opacity-0'
+        }`}
+        aria-hidden={!calOpen}
+        draggable={false}
+        onDragStart={(e) => e.preventDefault()}
+      >
+        <div className="mt-2 space-y-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              Add to calendar
+            </span>
+            {calFeedback && (
+              <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                {calFeedback}
+              </span>
+            )}
+            {calError && (
+              <span className="text-[10px] font-medium text-red-600 dark:text-red-400">
+                {calError}
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Date</span>
+              <input
+                type="text"
+                value={task.scheduled_for}
+                readOnly
+                className="mt-0.5 w-full cursor-default rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Time</span>
+              <input
+                type="time"
+                step={900}
+                value={calTime}
+                onChange={(e) => setCalTime(e.target.value)}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Minutes</span>
+              <input
+                type="number"
+                min={15}
+                max={480}
+                step={15}
+                value={calDuration}
+                onChange={(e) => setCalDuration(Math.max(15, parseInt(e.target.value, 10) || 15))}
+                className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </label>
+          </div>
+          <div className="flex items-center justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setCalOpen(false);
+                setCalFeedback(null);
+                setCalError(null);
+              }}
+              className="rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleAddToCalendar();
+              }}
+              disabled={calSaving}
+              className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            >
+              {calSaving ? 'Saving…' : 'Add to calendar'}
+            </button>
+          </div>
+          <p className="text-[10px] text-zinc-500 dark:text-zinc-400">
+            Creates a new calendar event. The task itself is unchanged.
+          </p>
+        </div>
       </div>
     </div>
   );

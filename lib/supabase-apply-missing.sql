@@ -85,9 +85,9 @@ ALTER TABLE habits
     CHECK (priority BETWEEN 0 AND 3);
 
 COMMENT ON COLUMN habits.duration_minutes IS
-  'Estimated minutes to complete the habit. Drives curfew fit analysis.';
+  'Optional estimated minutes per habit. Not currently consumed by any application code.';
 COMMENT ON COLUMN habits.priority IS
-  '0 = no priority, 1 = low, 2 = medium, 3 = high. Used for recommendation ordering.';
+  'Optional 0-3 priority bucket (0=none, 1=low, 2=medium, 3=high). Not currently consumed by any application code.';
 
 
 CREATE TABLE IF NOT EXISTS calendar_events (

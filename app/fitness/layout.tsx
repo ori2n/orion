@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import type { Metadata } from 'next';
-import { getCurrentUserId } from '@/lib/auth';
+import { getCurrentUserIdServer } from '@/lib/auth-server';
 import { FitnessSubnav } from '@/components/fitness/fitness-subnav';
 import { FitnessChromeTop } from '@/components/fitness/fitness-chrome-top';
 
@@ -9,8 +9,8 @@ import { FitnessChromeTop } from '@/components/fitness/fitness-chrome-top';
  *
  *   - Resolves the auth state server-side. No `userId = null` UI is
  *     rendered here; we redirect to /login so the dashboard never has
- *     to care about it. Each child page can call getCurrentUserId()
- *     again to fetch its own data.
+ *     to care about it. Each child page can call the same server
+ *     helper to fetch its own data.
  *
  *   - Provides the shared chrome (SYSTEM badge + date/time watermark)
  *     and the in-module sub-nav that links the deep pages together.
@@ -18,6 +18,13 @@ import { FitnessChromeTop } from '@/components/fitness/fitness-chrome-top';
  * The layout intentionally does NOT own data fetching — each page
  * loads its own slice of the data it needs (Stage 5 perf principle:
  * only the information for the current view).
+ *
+ * Auth note: we use `getCurrentUserIdServer()` (lib/auth-server.ts).
+ * The legacy browser-side `lib/auth.ts` helper instantiates the
+ * `document.cookie`-backed createBrowserClient, which returns
+ * `null` for `auth.getUser()` in non-browser runtimes — that sends
+ * every Server Component under this layout to `/login`, which the
+ * proxy then bounces to `/` for already-authenticated users.
  */
 
 export const metadata: Metadata = {
@@ -30,7 +37,7 @@ export default async function FitnessLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const userId = await getCurrentUserId();
+  const userId = await getCurrentUserIdServer();
   if (!userId) {
     // Stage 5 fitness is meaningless without a user. Boot to login.
     redirect('/login');

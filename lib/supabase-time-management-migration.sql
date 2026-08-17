@@ -1,22 +1,30 @@
 -- Time Management — Phase 1 schema foundation
 --
--- Additions:
---   1. habits.duration_minutes — optional estimated duration per habit.
---      The "smart habits" logic (curfew-based AVAILABLE/LOCKED states
---      and live recommendations) reads this column to decide whether a
---      habit fits in the remaining free time before curfew.
---   2. habits.priority — optional integer 0-3 (0 = no priority, 1 = low,
---      2 = medium, 3 = high). Drives ordering in the recommendations
---      banner; higher priority = appears earlier.
+-- Three SEPARATE systems on purpose:
+--   1. habits + habit_completions — recurring behaviours with daily
+--      completion + completion history.
+--   2. tasks — one-off to-dos with priority/due-date/duration.
+--   3. calendar_events — fixed scheduled blocks (school, tennis,
+--      football, appointments, holidays). These are commits that
+--      genuinely consume time on a clock; habits/tasks NEVER become
+--      calendar events automatically. Explicit user action
+--      ("Schedule this habit" / "Add to calendar" from a task) is the
+--      only path that bridges systems, and it CREATES a real row in
+--      this table — it does NOT mutate the source habit/task.
 --
--- New table:
---   3. calendar_events — fixed commitments ONLY (school, tennis,
---      football, appointments, holidays, manually created events).
---      Habits are intentionally NOT stored here — they remain
---      checkbox-based daily priorities; the calendar is reserved for
---      blocks that genuinely consume time.
+-- Architectural rule: each system has its own table, its own RLS, and
+-- no FKs into the others. Removing calendar_events must not break
+-- habits or tasks; deleting all calendar_events keeps habit/to-do data
+-- untouched.
+--
+-- Two OPTIONAL, currently-unwired columns on `habits` (kept for
+-- future use — do not delete without checking the data):
+--   * duration_minutes — estimated minutes per habit. Optional; no
+--     code reads it today.
+--   * priority — 0-3 (0 = none, 1 = low, 2 = medium, 3 = high).
+--     Optional; no code reads it today.
 
--- ─── habits: add duration + priority ───────────────────────────────
+-- ─── habits: add duration + priority (optional, unused by code) ───────
 
 ALTER TABLE habits
   ADD COLUMN IF NOT EXISTS duration_minutes INTEGER
@@ -26,11 +34,11 @@ ALTER TABLE habits
     CHECK (priority BETWEEN 0 AND 3);
 
 COMMENT ON COLUMN habits.duration_minutes IS
-  'Estimated minutes to complete the habit. Drives curfew fit analysis.';
+  'Optional estimated minutes per habit. Not currently consumed by any application code.';
 COMMENT ON COLUMN habits.priority IS
-  '0 = no priority, 1 = low, 2 = medium, 3 = high. Used for recommendation ordering.';
+  'Optional 0-3 priority bucket (0=none, 1=low, 2=medium, 3=high). Not currently consumed by any application code.';
 
--- ─── calendar_events: fixed commitments only ────────────────────────
+-- ─── calendar_events: fixed scheduled blocks only ──────────────────
 
 CREATE TABLE IF NOT EXISTS calendar_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -42,8 +50,6 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   location TEXT,
   notes TEXT,
   color TEXT,                -- e.g. 'bg-rose-500' or null for default
-  -- Used to distinguish fixed manual blocks from auto-imported ones
-  -- (Google Calendar, ICS, etc.) — Phase 4.
   source TEXT DEFAULT 'manual',
   CONSTRAINT calendar_events_end_after_start CHECK (end_at > start_at),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

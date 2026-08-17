@@ -2,60 +2,6 @@
 
 **Project:** ORION Fitness workout-system rebuild
 **Primary objective:** Replace manual workout logging with a reliable manual Hevy export → ORION import pipeline.
-# AUTONOMOUS WORK SESSION — USER TEMPORARILY AWAY
-
-The user may be temporarily unavailable while this workflow is being executed.
-
-During this period, maximise useful progress while maintaining the safety and checkpoint rules in this document.
-
-## Autonomous execution rules
-
-- Work through as much of the current workflow as can be safely completed without unnecessary user input.
-- Inspect the codebase and database yourself before asking questions.
-- If a question can reasonably be answered from the existing codebase, project conventions, actual data, or the requirements already defined in this document, make the appropriate technical decision yourself.
-- Do not stop merely because something is a minor implementation choice.
-- Continue through as many stages as can be safely completed during the available session.
-- Still create the required Git checkpoint after each completed stage.
-- Still run the project's normal build, type-checking, linting and tests.
-- Still follow all security rules in this document.
-- Still do not expose, request, or commit Supabase secret/service-role credentials.
-- Still do not modify unrelated ORION functionality unnecessarily.
-- Still do not modify physique photos or bodyweight.
-- Still do not implement features explicitly marked as out of scope.
-- Still do not make major product decisions that contradict this specification.
-
-## When user input is genuinely required
-
-If a stage contains a genuinely blocking product decision that cannot be resolved from this workflow, the existing codebase, or the available data:
-
-1. Complete everything else in that stage that can safely be completed.
-2. Save all safe progress.
-3. Create a Git checkpoint describing the current state.
-4. Clearly record the unresolved question.
-5. Stop at that point.
-
-Do not guess at major product requirements simply because the user is unavailable.
-
-## Checkpoints remain mandatory
-
-Autonomous execution does NOT remove the stage checkpoint system.
-
-After completing a stage:
-
-- Validate it.
-- Create the Git checkpoint.
-- Record what changed.
-- Record what was tested.
-- Record any warnings.
-- Mark the stage complete.
-- Continue to the next stage only if doing so is safe and does not require unresolved user input.
-
-The objective during an autonomous work session is:
-
-> **Make as much safe, tested, useful progress as possible while preserving the ability for the user to review and change decisions later.**
-
-Do not deliberately stop early when the next piece of work can be safely completed from the existing specification.
----
 
 # 0. READ THIS FIRST
 
