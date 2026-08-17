@@ -9,6 +9,10 @@
 import { supabase } from '@/lib/supabase';
 import { listExerciseMeta, type Muscle } from './muscles';
 import {
+  listMuscleTargets,
+  type HevyMuscleTarget,
+} from './muscle-targets';
+import {
   addWeeks,
   average,
   estimate1RM,
@@ -18,6 +22,7 @@ import {
 import type {
   ExerciseSummary,
   HevyCalculations,
+  MuscleOnTargetStatus,
   MuscleSummary,
   MuscleWeeklyPoint,
   WeeklyBucket,
@@ -34,6 +39,7 @@ export {
 export type {
   ExerciseSummary,
   HevyCalculations,
+  MuscleOnTargetStatus,
   MuscleSummary,
   MuscleWeeklyPoint,
   WeeklyBucket,
@@ -51,9 +57,43 @@ interface SetRow {
 
 // ─── Engine ────────────────────────────────────────────────────────
 
-/** Load all Hevy data for a user, joined in memory. */
+/**
+ * Default target applied when a user has not customised one yet.
+ * Stage 5 explicitly does NOT offer a single hard-coded "2×/week"
+ * across all muscles, but until the user customises, this is a
+ * sensible placeholder.
+ */
+const DEFAULT_TARGET_SESSIONS_PER_WEEK = 2;
+
+/**
+ * Compare actual vs target sessions over a recent rolling window and
+ * reduce to a 3-band status. Bands are intentionally generous so
+ * normal scheduling jitter doesn't flip a "On target" badge.
+ */
+function bandOnTarget(
+  actual: number | null,
+  target: number,
+): MuscleOnTargetStatus {
+  if (actual === null) return null;
+  if (target <= 0) return null; // user opted out of tracking this muscle
+  const ratio = actual / target;
+  if (ratio < 0.6) return 'below';
+  if (ratio > 1.2) return 'above';
+  return 'on';
+}
+
+/** Load all Hevy data for a user, joined in memory.
+ *
+ * If `userId` is supplied AND `targetsOverride` is omitted, the
+ * user's stored per-muscle targets are loaded from
+ * `hevy_muscle_targets` and merged into the result. Pass
+ * `targetsOverride` to bypass DB round-tripping (used by tests / the
+ * editor when a freshly-edited value should re-run calculations
+ * without writing to the DB first).
+ */
 export async function computeHevyCalculations(
   userId: string | null,
+  targetsOverride?: HevyMuscleTarget[] | null,
 ): Promise<HevyCalculations> {
   const empty: HevyCalculations = {
     exercises: [],
@@ -66,7 +106,7 @@ export async function computeHevyCalculations(
   if (!userId) return empty;
 
   try {
-    const [workouts, exercises, sets, meta] = await Promise.all([
+    const [workouts, exercises, sets, meta, storedTargets] = await Promise.all([
       supabase.from('hevy_workouts').select('id, start_time').eq('user_id', userId),
       supabase
         .from('hevy_workout_exercises')
@@ -77,6 +117,9 @@ export async function computeHevyCalculations(
         .select('workout_exercise_id, weight_kg, reps')
         .eq('user_id', userId),
       listExerciseMeta(userId),
+      targetsOverride === undefined
+        ? listMuscleTargets(userId)
+        : Promise.resolve(targetsOverride ?? []),
     ]);
 
     if (workouts.error || exercises.error || sets.error) {
@@ -104,6 +147,12 @@ export async function computeHevyCalculations(
     for (const m of meta) {
       muscleBy.set(m.exerciseName, m.muscle);
       manualBy.set(m.exerciseName, m.manual1rmKg);
+    }
+
+    // Per-muscle user-defined targets + notes.
+    const targetBy = new Map<string, HevyMuscleTarget>();
+    for (const t of storedTargets) {
+      targetBy.set(t.muscle, t);
     }
 
     // Per-exercise aggregation.
@@ -215,27 +264,31 @@ export async function computeHevyCalculations(
       );
       const totalSets = points.reduce((n, p) => n + p.sets, 0);
       const totalVolume = points.reduce((n, p) => n + p.volumeKg, 0);
+      const tgt = targetBy.get(m);
+      const sessionsLast4 =
+        maxWeek ? countSessionsInWindow(points, maxWeek, 4) : 0;
+      const actualLast4 = maxWeek ? sessionsLast4 / 4 : null;
       muscles.push({
         muscle: m,
         totalSets,
         totalVolumeKg: Math.round(totalVolume * 100) / 100,
         avgSetsPerWeek: average(points.map((p) => p.sets)),
         sessionsPerWeek: average(points.map((p) => p.sessions)),
+        sessionsLast4Weeks: sessionsLast4,
+        actualSessionsPerWeekLast4: actualLast4,
         last4WeekSetsAvg: maxWeek ? averageWeekWindow(points, maxWeek, 4) : null,
         last8WeekSetsAvg: maxWeek ? averageWeekWindow(points, maxWeek, 8) : null,
-        targetSessionsPerWeek: 2,
-        onTarget: null,
+        targetSessionsPerWeek: tgt?.targetSessionsPerWeek ?? DEFAULT_TARGET_SESSIONS_PER_WEEK,
+        targetNotes: tgt?.notes ?? null,
+        onTarget: bandOnTarget(
+          actualLast4,
+          tgt?.targetSessionsPerWeek ?? DEFAULT_TARGET_SESSIONS_PER_WEEK,
+        ),
         weekly: points,
       });
     }
 
-    // Frequency comparison against the ~2×/week target.
-    for (const m of muscles) {
-      m.onTarget =
-        m.sessionsPerWeek === null
-          ? null
-          : m.sessionsPerWeek >= m.targetSessionsPerWeek;
-    }
+    // Frequency comparison is now done inline per muscle above.
 
     // Unmapped exercise names present in the data.
     const unmappedExercises = [...agg.keys()]
@@ -289,4 +342,20 @@ function averageWeekWindow(
     sum += byWeek.get(wk) ?? 0;
   }
   return Math.round((sum / n) * 10) / 10;
+}
+
+/** Sum sessions in the last `n` calendar weeks (zero-filled). */
+function countSessionsInWindow(
+  points: MuscleWeeklyPoint[],
+  maxWeek: string,
+  n: number,
+): number {
+  if (n <= 0) return 0;
+  const byWeek = new Map(points.map((p) => [p.week, p.sessions]));
+  let sum = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    const wk = addWeeks(maxWeek, -i);
+    sum += byWeek.get(wk) ?? 0;
+  }
+  return sum;
 }

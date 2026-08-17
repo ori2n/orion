@@ -162,7 +162,7 @@ function Summary({ calcs }: { calcs: HevyCalculations }) {
 
       <div>
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
-          Sets per muscle per week (target ~2×/week)
+          Sets per muscle per week (target customisable in Manage Data)
         </div>
         <div className="divide-y divide-zinc-800/60">
           {calcs.muscles.map((m) => (
@@ -182,12 +182,20 @@ function Summary({ calcs }: { calcs: HevyCalculations }) {
                   className={
                     m.onTarget === null
                       ? 'text-zinc-600'
-                      : m.onTarget
+                      : m.onTarget === 'on'
                         ? 'text-emerald-300'
-                        : 'text-amber-300'
+                        : m.onTarget === 'below'
+                          ? 'text-amber-300'
+                          : 'text-sky-300'
                   }
                 >
-                  {m.onTarget === null ? '—' : m.onTarget ? 'on target' : 'below'}
+                  {m.onTarget === null
+                    ? '—'
+                    : m.onTarget === 'on'
+                      ? 'on target'
+                      : m.onTarget === 'below'
+                        ? 'below'
+                        : 'above'}
                 </span>
               </div>
             </div>

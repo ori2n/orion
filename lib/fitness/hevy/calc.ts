@@ -88,6 +88,18 @@ export interface MuscleWeeklyPoint {
   volumeKg: number;
 }
 
+/**
+ * Three-band on-target status, derived from actual vs target sessions
+ * over a recent rolling window (4 weeks by default).
+ *
+ *   'below' — actual < 60% of target
+ *   'on'    — actual within ±20% of target (60% .. 120%)
+ *   'above' — actual > 120% of target
+ *
+ * `null` means no exercise data for the muscle yet.
+ */
+export type MuscleOnTargetStatus = 'below' | 'on' | 'above' | null;
+
 export interface MuscleSummary {
   muscle: string;
   totalSets: number;
@@ -96,13 +108,22 @@ export interface MuscleSummary {
   avgSetsPerWeek: number | null;
   /** Training frequency: sessions per week across active weeks. */
   sessionsPerWeek: number | null;
+  /**
+   * Distinct session count inside the last 4 calendar weeks — the
+   * denominator for the on-target comparison.
+   */
+  sessionsLast4Weeks: number;
+  /** Weekly session average for the last 4 calendar weeks. */
+  actualSessionsPerWeekLast4: number | null;
   /** Average weekly sets over the last 4 calendar weeks (zero-filled). */
   last4WeekSetsAvg: number | null;
   /** Average weekly sets over the last 8 calendar weeks (zero-filled). */
   last8WeekSetsAvg: number | null;
-  /** Configurable target (default 2 sessions/week). */
+  /** Configurable target. `0` = user explicitly opted out of tracking. */
   targetSessionsPerWeek: number;
-  onTarget: boolean | null;
+  /** User's free-form context note. NOT to be rewritten by automated flows. */
+  targetNotes: string | null;
+  onTarget: MuscleOnTargetStatus;
   weekly: MuscleWeeklyPoint[];
 }
 
