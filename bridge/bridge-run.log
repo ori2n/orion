@@ -1,0 +1,23 @@
+Freebuff Bridge
+Connected to ORION
+Working dir : C:\Users\edoar\second-brain
+Command     : freebuff
+Main branch : main
+Freebuff: Idle
+Waiting for task...
+[17:42:41] [INFO] Supabase key: role=service_role project_ref=wzannjbkgkdhsutsmcug
+[17:42:41] [INFO] Supabase URL: project_ref=wzannjbkgkdhsutsmcug
+[17:42:41] [INFO] Supabase connection OK — freebuff_tasks total rows = 1
+[17:42:42] [INFO] Currently queued tasks = 0
+[17:42:42] [INFO] No stale tasks to reconcile.
+[17:42:42] [INFO] Polling started — tasks every 2000 ms, commands every 1000 ms
+[17:42:42] [INFO] task query executed → 0 queued task(s) found
+[17:43:13] [INFO] task query executed → 0 queued task(s) found
+[17:43:29] [INFO] task query executed → 1 queued task(s) found
+[17:43:29] [INFO] Task detected: "Stop-flow test" (c87f2cea)
+[17:43:29] [INFO] Task claimed → status "starting" (session e898c425)
+[17:43:29] [INFO] Starting task "Stop-flow test" (c87f2cea)
+[17:43:30] [INFO] On branch freebuff/task-stop-flow-test-c87f2cea
+[17:43:30] [INFO] Freebuff launch started (branch freebuff/task-stop-flow-test-c87f2cea)
+Freebuff: Running                    
+[17:43:38] [INFO] Initial prompt sent.

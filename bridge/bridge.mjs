@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import pty from 'node-pty';
 import { assertConfig, config } from './lib/config.mjs';
 import { getSupabase } from './lib/supabase.mjs';
@@ -44,10 +46,116 @@ function banner() {
   console.log('Waiting for task...');
 }
 
+// ─── Supabase diagnostics ─────────────────────────────────────────
+// These report the key's role + project ref (derived from the JWT, never
+// the secret itself) and run a cheap connectivity check so a wrong key or
+// wrong URL is obvious in the logs instead of a silent "Waiting…".
+
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const normalized = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function logSupabaseIdentity() {
+  const payload = decodeJwtPayload(config.serviceRoleKey);
+  const urlRef = (config.supabaseUrl.match(/https:\/\/([^.]+)\./) ?? [])[1] ?? 'unknown';
+
+  if (!payload) {
+    log('warn', 'Could not decode SUPABASE_SERVICE_ROLE_KEY (is it a full JWT?). Behaviour may be wrong.');
+  } else {
+    const role = payload.role ?? 'unknown';
+    const ref = payload.ref ?? 'unknown';
+    log('info', `Supabase key: role=${role} project_ref=${ref}`);
+    if (role !== 'service_role') {
+      log('warn', `SUPABASE_SERVICE_ROLE_KEY has role "${role}", not "service_role" — RLS will hide rows. Use Dashboard → Settings → API → service_role.`);
+    }
+    if (ref !== 'unknown' && urlRef !== 'unknown' && ref !== urlRef) {
+      log('warn', `Key project_ref=${ref} does not match URL project_ref=${urlRef} — key and URL are for different projects.`);
+    }
+  }
+  log('info', `Supabase URL: project_ref=${urlRef}`);
+}
+
+async function verifyConnection() {
+  const sb = getSupabase();
+  const { count, error } = await sb
+    .from('freebuff_tasks')
+    .select('id', { count: 'exact', head: true });
+  if (error) {
+    log('error', `Supabase connection FAILED: ${error.message} (code: ${error.code ?? 'n/a'})`);
+    return;
+  }
+  log('info', `Supabase connection OK — freebuff_tasks total rows = ${count ?? 0}`);
+
+  const { count: queuedCount, error: qErr } = await sb
+    .from('freebuff_tasks')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'queued');
+  if (qErr) {
+    log('error', `queued-count check failed: ${qErr.message}`);
+  } else {
+    log('info', `Currently queued tasks = ${queuedCount ?? 0}`);
+  }
+}
+
 // ─── Small helpers ────────────────────────────────────────────────
+
+const execFileP = promisify(execFile);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// node-pty's proc.kill() only terminates the shell (powershell). The real
+// `freebuff` runs as a CHILD of that shell, so on Windows we must kill the
+// whole tree with taskkill /T /F, otherwise the orphan keeps running.
+async function killProcessTree(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') {
+    try {
+      await execFileP('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+      return true;
+    } catch (e) {
+      log('warn', `taskkill failed: ${e?.stderr ?? e?.message ?? e}`);
+      return false;
+    }
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+    return true;
+  } catch {
+    try {
+      process.kill(pid, 'SIGKILL');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function isProcessRunning(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileP('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { windowsHide: true });
+      return (stdout ?? '').includes(String(pid));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function slug(title) {
@@ -65,6 +173,12 @@ function slug(title) {
 const state = {
   active: null,
   flushTimer: null,
+};
+
+// Poll telemetry — used only for diagnostics (never the secret key).
+const pollStats = {
+  lastQueued: -1,
+  lastLogAt: 0,
 };
 
 function setStatusLine(label) {
@@ -143,6 +257,7 @@ function spawnSession(task) {
   });
 
   const a = state.active;
+  if (a) a.pid = proc.pid;
   proc.onData((data) => {
     if (!a || a.proc !== proc) return;
     a.outputBuffer += data;
@@ -253,11 +368,23 @@ async function maybeStartNextTask() {
     .order('created_at', { ascending: true })
     .limit(1);
   if (error) {
-    log('error', `task poll failed: ${error.message}`);
+    log('error', `task query failed: ${error.message} (code: ${error.code ?? 'n/a'})`);
     return;
   }
+
+  // Report the poll result on change, when something is found, or on a
+  // 30s heartbeat so a silent "0 queued" is never mistaken for a dead loop.
+  const queued = data?.length ?? 0;
+  const nowMs = Date.now();
+  if (queued !== pollStats.lastQueued || queued > 0 || nowMs - pollStats.lastLogAt >= 30000) {
+    log('info', `task query executed → ${queued} queued task(s) found`);
+    pollStats.lastQueued = queued;
+    pollStats.lastLogAt = nowMs;
+  }
+
   const task = data?.[0];
   if (!task) return;
+  log('info', `Task detected: "${task.title}" (${task.id.slice(0, 8)})`);
 
   const sessionId = randomUUID();
   const startedAt = new Date().toISOString();
@@ -269,6 +396,7 @@ async function maybeStartNextTask() {
     log('error', `failed to claim task: ${claimError.message}`);
     return;
   }
+  log('info', `Task claimed → status "starting" (session ${sessionId.slice(0, 8)})`);
 
   log('info', `Starting task "${task.title}" (${task.id.slice(0, 8)})`);
 
@@ -299,11 +427,25 @@ async function maybeStartNextTask() {
     }
   }
 
+  // Re-check the task is still claimable before spawning: a Stop command
+  // may have arrived while git was running (the command loop is
+  // independent), marking the task stopped in the meantime.
+  const { data: freshRows } = await sb
+    .from('freebuff_tasks')
+    .select('status')
+    .eq('id', task.id)
+    .limit(1);
+  if (freshRows?.[0]?.status !== 'starting') {
+    log('warn', `Task ${task.id.slice(0, 8)} is now "${freshRows?.[0]?.status ?? 'unknown'}" — aborting launch.`);
+    return;
+  }
+
   state.active = {
     taskId: task.id,
     userId: task.user_id,
     sessionId,
     branchName,
+    pid: null,
     outputBuffer: '',
     lastOutputAt: Date.now(),
     stoppedByUser: false,
@@ -313,6 +455,7 @@ async function maybeStartNextTask() {
   };
 
   state.active.proc = spawnSession(task);
+  log('info', `Freebuff launch started (branch ${branchName})`);
   setStatusLine('Running');
   startFlushTimer();
 
@@ -345,7 +488,10 @@ async function processPendingCommands() {
     .eq('status', 'pending')
     .order('created_at', { ascending: true })
     .limit(10);
-  if (error) return;
+  if (error) {
+    log('error', `command poll failed: ${error.message} (code: ${error.code ?? 'n/a'})`);
+    return;
+  }
 
   for (const cmd of data ?? []) {
     await sb.from('freebuff_commands').update({ status: 'acknowledged' }).eq('id', cmd.id);
@@ -381,34 +527,79 @@ async function processPendingCommands() {
   }
 }
 
+async function markTaskStopped(taskId) {
+  const now = new Date().toISOString();
+  const { error } = await getSupabase()
+    .from('freebuff_tasks')
+    .update({ status: 'stopped', stopped_at: now, completed_at: now })
+    .eq('id', taskId);
+  if (error) {
+    log('error', `failed to mark task stopped: ${error.message}`);
+    return false;
+  }
+  return true;
+}
+
 async function handleStop(task) {
+  log('info', `Stop command detected for task ${task.id.slice(0, 8)}`);
+
   const a = state.active;
   if (a && a.taskId === task.id && !a.exited) {
-    log('info', 'Stop requested — sending Ctrl+C.');
+    log('info', `Stopping task ${task.id.slice(0, 8)}`);
     a.stoppedByUser = true;
+
+    log('info', 'Sending Ctrl+C');
     try {
       a.proc.write('\x03');
-    } catch {}
-    const exited = await waitForExit(a, config.stopTimeoutMs);
+    } catch (e) {
+      log('warn', `Ctrl+C failed: ${e?.message ?? e}`);
+    }
+
+    log('info', 'Waiting for Freebuff to exit');
+    let exited = await waitForExit(a, config.stopTimeoutMs);
+
     if (!exited && state.active === a && !a.exited) {
-      log('warn', 'Process still alive after timeout — force terminating.');
-      try {
-        a.proc.kill();
-      } catch {}
-      await waitForExit(a, 2000);
+      log('warn', 'Force-killing Freebuff process tree');
+      const killed = await killProcessTree(a.pid);
+      if (killed) {
+        log('info', 'Process terminated');
+      } else {
+        log('warn', 'taskkill failed — falling back to PTY kill');
+        try {
+          a.proc.kill();
+        } catch {}
+      }
+      // Confirm the process is actually gone (Windows: check by PID).
+      const stillRunning = a.pid ? await isProcessRunning(a.pid) : !a.exited;
+      log(stillRunning ? 'warn' : 'info', stillRunning
+        ? 'Process still reported running after kill attempt.'
+        : 'Process confirmed gone');
+      exited = await waitForExit(a, 2000);
     }
-    if (!a.exited && state.active === a) {
-      // Force-kill didn't trigger onExit in time — finalize directly.
-      a.stoppedByUser = true;
+
+    if (exited) {
+      log('info', 'Freebuff exited');
+    } else if (state.active === a && !a.exited) {
+      // onExit never fired — finalize manually so the task is never left
+      // stuck in "running".
+      log('warn', 'Freebuff still alive after force-kill — finalizing manually.');
       await handleExit(null);
+      return;
     }
+
+    // Make sure the row ends `stopped` even if the exit handler is still
+    // reconciling in flight (idempotent).
+    await markTaskStopped(task.id);
+    log('info', 'Task marked stopped');
     return;
   }
-  // No live process for this task — just mark it stopped.
-  await getSupabase()
-    .from('freebuff_tasks')
-    .update({ status: 'stopped', stopped_at: new Date().toISOString() })
-    .eq('id', task.id);
+
+  // No live session handle — the process is stale/orphaned (e.g. the
+  // bridge was restarted mid-task). Reconcile the row so the UI clears and
+  // a new task can start. Git branches and file changes are kept.
+  log('warn', `No live session for task ${task.id.slice(0, 8)} — marking stopped (stale task).`);
+  await markTaskStopped(task.id);
+  log('info', 'Task marked stopped');
 }
 
 function assertReviewable(task) {
@@ -497,26 +688,59 @@ async function processFollowUps() {
 // ─── Startup reconcile + main loop ────────────────────────────────
 
 async function reconcileOnStartup() {
-  // If this Bridge restarts while a task was marked starting/running,
-  // the session handle is gone — mark it failed rather than leaving a
-  // stuck "running" task. Queued tasks are left alone to be picked up.
-  const { error } = await getSupabase()
+  // If this Bridge (re)starts while a task is marked starting/running, the
+  // PTY session handle is gone and the local process may be orphaned.
+  // Recover the row to `failed` so the UI un-sticks and a new task can
+  // start. Git branches and file changes are left intact — nothing is
+  // deleted. Queued tasks are left alone to be picked up.
+  const { data, error } = await getSupabase()
     .from('freebuff_tasks')
     .update({
       status: 'failed',
       error: 'Bridge restarted; task interrupted.',
       completed_at: new Date().toISOString(),
     })
-    .in('status', ['starting', 'running']);
-  if (error) log('warn', `startup reconcile failed: ${error.message}`);
+    .in('status', ['starting', 'running'])
+    .select('id');
+  if (error) {
+    log('warn', `startup reconcile failed: ${error.message}`);
+    return;
+  }
+  if (data?.length) {
+    log('warn', `Reconciled ${data.length} stale task(s) (starting/running → failed); git branches kept.`);
+  } else {
+    log('info', 'No stale tasks to reconcile.');
+  }
 }
 
-async function tick() {
-  await processPendingCommands();
-  if (state.active) {
-    await processFollowUps();
-  } else {
-    await maybeStartNextTask();
+// Command channel runs on its OWN loop so a hung git/PTY step in the task
+// loop can never block Stop / Approve / Discard.
+async function runCommandLoop() {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      await processPendingCommands();
+    } catch (e) {
+      log('error', `command poll failed: ${e?.message ?? e}`);
+    }
+    await sleep(config.commandPollMs);
+  }
+}
+
+// Task lifecycle loop: start the next queued task or drive follow-ups.
+async function runTaskLoop() {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      if (state.active) {
+        await processFollowUps();
+      } else {
+        await maybeStartNextTask();
+      }
+    } catch (e) {
+      log('error', `tick failed: ${e?.message ?? e}`);
+    }
+    await sleep(config.pollIntervalMs);
   }
 }
 
@@ -529,17 +753,12 @@ async function main() {
   }
 
   banner();
+  logSupabaseIdentity();
+  await verifyConnection();
   await reconcileOnStartup();
+  log('info', `Polling started — tasks every ${config.pollIntervalMs} ms, commands every ${config.commandPollMs} ms`);
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      await tick();
-    } catch (e) {
-      log('error', `tick failed: ${e?.message ?? e}`);
-    }
-    await sleep(config.pollIntervalMs);
-  }
+  await Promise.all([runCommandLoop(), runTaskLoop()]);
 }
 
 process.on('SIGINT', () => {

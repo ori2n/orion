@@ -56,10 +56,16 @@ export const config = {
   mainBranch: process.env.MAIN_BRANCH ?? 'main',
 
   pollIntervalMs: int(process.env.POLL_INTERVAL_MS, 2000),
+  // Command channel (stop / approve / discard) polls on its own faster
+  // cadence, independent of new-task polling.
+  commandPollMs: int(process.env.COMMAND_POLL_MS, 1000),
   initWaitMs: int(process.env.INIT_WAIT_MS, 4000),
   promptSettleMs: int(process.env.PROMPT_SETTLE_MS, 3000),
   followUpSettleMs: int(process.env.FOLLOWUP_SETTLE_MS, 2500),
   stopTimeoutMs: int(process.env.STOP_TIMEOUT_MS, 10000),
+  // Hard cap on any single git command so a hung push/checkout can never
+  // wedge the bridge loop.
+  gitTimeoutMs: int(process.env.GIT_TIMEOUT_MS, 30000),
 
   terminalFlushMs: int(process.env.TERMINAL_FLUSH_MS, 600),
   terminalMaxChunks: int(process.env.TERMINAL_MAX_CHUNKS, 2000),

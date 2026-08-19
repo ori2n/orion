@@ -27,6 +27,8 @@ import {
 } from 'react';
 import { getCurrentUserId } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
+import { getTasks } from '@/lib/tasks';
+import type { Task } from '@/lib/tasks';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,13 @@ export interface CalendarEvent {
 type View = 'day' | 'week' | 'month';
 type RecurrenceFreq = 'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
 
+export interface HabitSummary {
+  id: string;
+  name: string;
+  duration_minutes?: number | null;
+  frequency?: string;
+}
+
 interface CalendarPanelProps {
   /**
    * Optional. If omitted, CalendarPanel fetches its own events from
@@ -69,6 +78,17 @@ interface CalendarPanelProps {
    * `handleSave` path).
    */
   refreshKey?: number;
+  /**
+   * Habits surfaced read-only in the sidebar's Today/Upcoming list.
+   * Provided by the parent so the list stays in sync with the Habits
+   * tab without a second fetch.
+   */
+  habits?: HabitSummary[];
+  /**
+   * Today's completed habit ids — used to derive "incomplete" habits
+   * for the sidebar. Habits remain habits; this never creates events.
+   */
+  habitCompletions?: Set<string>;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -91,6 +111,10 @@ const TIMELINE_HEIGHT_PX = TOTAL_HOURS * PX_PER_HOUR;
 const SNAP_MINUTES = 15;
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Sunday-first weekday labels for the Outlook/Google-style month grid.
+const WEEKDAYS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAYS_SUN_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -517,11 +541,14 @@ export default function CalendarPanel({
   events: propEvents,
   onMutate: propOnMutate,
   refreshKey,
+  habits = [],
+  habitCompletions = new Set<string>(),
 }: CalendarPanelProps = {}) {
   // Internal fallback: when the parent doesn't pass events/onMutate, we
   // manage them ourselves. This keeps the component drop-in for callers
   // who just want <CalendarPanel /> with no wiring.
   const [internalEvents, setInternalEvents] = useState<CalendarEvent[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const internalRefetch = useCallback(async () => {
     const uid = await getCurrentUserId();
     if (!uid) return;
@@ -531,6 +558,9 @@ export default function CalendarPanel({
       .eq('user_id', uid)
       .order('start_at');
     if (!error && data) setInternalEvents(data as CalendarEvent[]);
+    // Also refresh the sidebar's todo list in the same pass so it stays
+    // in sync with the To-dos tab without a separate effect.
+    setTasks(await getTasks());
   }, []);
   useEffect(() => {
     if (propEvents === undefined) {
@@ -685,91 +715,120 @@ export default function CalendarPanel({
   }, [nlDraft, anchorDate]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <CalendarHeader
-        view={view}
-        setView={setView}
-        anchorDate={anchorDate}
-        goToday={goToday}
-        navigate={navigate}
-        onAdd={handleNewEvent}
-        nlDraft={nlDraft}
-        setNlDraft={setNlDraft}
-        onNLSubmit={handleNLSubmit}
-        nlError={nlError}
-      />
-
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {view === 'day' && (
-          <DayView
-            anchorDate={anchorDate}
-            allDayEvents={allDayEvents}
-            timedEvents={timedEvents}
-            onCreateRange={(startISO, endISO) =>
-              setCreating({
-                title: '',
-                startISO,
-                endISO,
-                allDay: false,
-                prefill: '',
-              })
-            }
-            onUpdateEvent={async (id, iso) => {
-              const uid = await getCurrentUserId();
-              if (!uid) return;
-              // iso is { start_at, end_at }
-              await supabase.from('calendar_events').update(iso).eq('id', id);
-              await onMutate();
-            }}
-            onClickEvent={(e) => setEditing(e)}
-          />
-        )}
-
-        {view === 'week' && (
-          <WeekView
-            anchorDate={anchorDate}
-            events={events}
-            onClickEvent={(e) => setEditing(e)}
-            onCreateQuick={(date) => {
-              const start = new Date(date);
-              start.setHours(9, 0, 0, 0);
-              const end = new Date(start);
-              end.setHours(10, 0, 0, 0);
-              setCreating({
-                title: '',
-                startISO: start.toISOString(),
-                endISO: end.toISOString(),
-                allDay: false,
-                prefill: '',
-              });
-            }}
-          />
-        )}
-
-        {view === 'month' && (
-          <MonthView
-            anchorDate={anchorDate}
-            events={events}
-            onClickEvent={(e) => setEditing(e)}
-            onCreateQuick={(date) => {
-              const start = new Date(date);
-              start.setHours(9, 0, 0, 0);
-              const end = new Date(start);
-              end.setHours(10, 0, 0, 0);
-              setCreating({
-                title: '',
-                startISO: start.toISOString(),
-                endISO: end.toISOString(),
-                allDay: false,
-                prefill: '',
-              });
-            }}
-            onDayClick={(date) => {
-              setAnchorDate(startOfDay(date));
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 md:flex-row">
+      {/* Left sidebar — compact mini month + Today/Upcoming list. On
+          mobile it stacks above the day view; on md+ it's a fixed column. */}
+      <aside className="flex w-full shrink-0 flex-col border-b border-zinc-200 dark:border-zinc-800 md:w-64 md:border-b-0 md:border-r">
+        <div className="shrink-0 border-b border-zinc-200 dark:border-zinc-800">
+          <MiniMonthCalendar
+            selectedDate={anchorDate}
+            onSelectDate={(d) => {
+              setAnchorDate(startOfDay(d));
               setView('day');
             }}
           />
-        )}
+        </div>
+        <div className="max-h-44 min-h-0 overflow-y-auto md:max-h-none md:flex-1">
+          <TodayUpcoming
+            events={events}
+            habits={habits}
+            completions={habitCompletions}
+            tasks={tasks}
+            onSelectDate={(d) => {
+              setAnchorDate(startOfDay(d));
+              setView('day');
+            }}
+          />
+        </div>
+      </aside>
+
+      {/* Main — focused day view (week/month remain available). */}
+      <div className="flex min-w-0 flex-1 flex-col min-h-0">
+        <CalendarHeader
+          view={view}
+          setView={setView}
+          anchorDate={anchorDate}
+          goToday={goToday}
+          navigate={navigate}
+          onAdd={handleNewEvent}
+          nlDraft={nlDraft}
+          setNlDraft={setNlDraft}
+          onNLSubmit={handleNLSubmit}
+          nlError={nlError}
+        />
+
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {view === 'day' && (
+            <DayView
+              anchorDate={anchorDate}
+              allDayEvents={allDayEvents}
+              timedEvents={timedEvents}
+              onCreateRange={(startISO, endISO) =>
+                setCreating({
+                  title: '',
+                  startISO,
+                  endISO,
+                  allDay: false,
+                  prefill: '',
+                })
+              }
+              onUpdateEvent={async (id, iso) => {
+                const uid = await getCurrentUserId();
+                if (!uid) return;
+                // iso is { start_at, end_at }
+                await supabase.from('calendar_events').update(iso).eq('id', id);
+                await onMutate();
+              }}
+              onClickEvent={(e) => setEditing(e)}
+            />
+          )}
+
+          {view === 'week' && (
+            <WeekView
+              anchorDate={anchorDate}
+              events={events}
+              onClickEvent={(e) => setEditing(e)}
+              onCreateQuick={(date) => {
+                const start = new Date(date);
+                start.setHours(9, 0, 0, 0);
+                const end = new Date(start);
+                end.setHours(10, 0, 0, 0);
+                setCreating({
+                  title: '',
+                  startISO: start.toISOString(),
+                  endISO: end.toISOString(),
+                  allDay: false,
+                  prefill: '',
+                });
+              }}
+            />
+          )}
+
+          {view === 'month' && (
+            <MonthView
+              anchorDate={anchorDate}
+              events={events}
+              onClickEvent={(e) => setEditing(e)}
+              onCreateQuick={(date) => {
+                const start = new Date(date);
+                start.setHours(9, 0, 0, 0);
+                const end = new Date(start);
+                end.setHours(10, 0, 0, 0);
+                setCreating({
+                  title: '',
+                  startISO: start.toISOString(),
+                  endISO: end.toISOString(),
+                  allDay: false,
+                  prefill: '',
+                });
+              }}
+              onDayClick={(date) => {
+                setAnchorDate(startOfDay(date));
+                setView('day');
+              }}
+            />
+          )}
+        </div>
       </div>
 
       {(creating || editing) && (
@@ -782,6 +841,265 @@ export default function CalendarPanel({
           colors={PRESET_COLORS}
         />
       )}
+    </div>
+  );
+}
+
+// ─── Sidebar: mini month calendar ─────────────────────────────────────────
+
+const MINI_DOW = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+function MiniMonthCalendar({
+  selectedDate,
+  onSelectDate,
+}: {
+  selectedDate: Date;
+  onSelectDate: (d: Date) => void;
+}) {
+  const now = useNow();
+  const today = startOfDay(now);
+
+  // The visible month is independent of the selected day so the user can
+  // page through months without changing the day view. It resyncs to the
+  // selected day's month whenever that day changes.
+  const [visibleMonth, setVisibleMonth] = useState<Date>(() => startOfMonth(selectedDate));
+  // Keep the mini calendar pinned to the selected day's month using
+  // React's "adjust state during render" pattern (no effect needed).
+  const selectedMonthKey = `${selectedDate.getFullYear()}-${selectedDate.getMonth()}`;
+  const [lastSelectedMonthKey, setLastSelectedMonthKey] = useState(selectedMonthKey);
+  if (lastSelectedMonthKey !== selectedMonthKey) {
+    setLastSelectedMonthKey(selectedMonthKey);
+    setVisibleMonth(startOfMonth(selectedDate));
+  }
+
+  // Monday-first grid, always 6 rows for a stable compact shape.
+  const gridStart = startOfWeek(startOfMonth(visibleMonth));
+  const cells: Date[] = [];
+  const cur = new Date(gridStart);
+  for (let i = 0; i < 42; i++) {
+    cells.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return (
+    <div className="px-3 py-3">
+      <div className="mb-2 flex items-center justify-between gap-1">
+        <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          {fmtMonthYear(visibleMonth)}
+        </span>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            aria-label="Previous month"
+            onClick={() => setVisibleMonth((m) => {
+              const n = new Date(m);
+              n.setMonth(n.getMonth() - 1);
+              return n;
+            })}
+            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Next month"
+            onClick={() => setVisibleMonth((m) => {
+              const n = new Date(m);
+              n.setMonth(n.getMonth() + 1);
+              return n;
+            })}
+            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-1 grid grid-cols-7 text-center">
+        {MINI_DOW.map((w, i) => (
+          <span key={i} className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+            {w}
+          </span>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7 gap-y-0.5">
+        {cells.map((d, i) => {
+          const isToday = sameDay(d, today);
+          const isSelected = sameDay(d, selectedDate);
+          const inMonth = d.getMonth() === visibleMonth.getMonth();
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => onSelectDate(d)}
+              aria-label={fmtLongDate(d)}
+              className={`mx-auto flex h-7 w-7 items-center justify-center rounded-full text-[11px] tabular-nums transition-colors ${
+                isSelected
+                  ? 'bg-zinc-900 font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900'
+                  : isToday
+                  ? 'font-bold text-rose-600 ring-1 ring-inset ring-rose-400/60 dark:text-rose-400 dark:ring-rose-400/50'
+                  : inMonth
+                  ? 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800'
+                  : 'text-zinc-300 hover:bg-zinc-100 dark:text-zinc-600 dark:hover:bg-zinc-800'
+              }`}
+            >
+              {d.getDate()}
+            </button>
+          );
+        })}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => {
+          setVisibleMonth(startOfMonth(new Date()));
+          onSelectDate(startOfDay(new Date()));
+        }}
+        className="mt-2 w-full rounded-md border border-zinc-200 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+      >
+        Today
+      </button>
+    </div>
+  );
+}
+
+// ─── Sidebar: Today / Upcoming list ───────────────────────────────────────
+
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function fmtRelativeDay(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00`);
+  const diff = Math.round((startOfDay(d).getTime() - startOfDay(new Date()).getTime()) / 86400000);
+  if (diff <= 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  if (diff < 7) return d.toLocaleDateString('en-US', { weekday: 'short' });
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function TodayUpcoming({
+  events, habits, completions, tasks, onSelectDate,
+}: {
+  events: CalendarEvent[];
+  habits: HabitSummary[];
+  completions: Set<string>;
+  tasks: Task[];
+  onSelectDate: (d: Date) => void;
+}) {
+  const now = new Date();
+  const todayKey = ymd(now);
+
+  // Incomplete habits = not yet completed today.
+  const incompleteHabits = habits.filter((h) => !completions.has(h.id)).slice(0, 6);
+  const todayTodos = tasks
+    .filter((t) => t.status === 'pending' && t.scheduled_for === todayKey)
+    .slice(0, 6);
+
+  // Upcoming events (next 14 days) with recurring rules expanded so the
+  // next occurrence shows on the correct date.
+  const horizonEnd = new Date(now);
+  horizonEnd.setDate(horizonEnd.getDate() + 14);
+  const upcomingEvents = expandAllForRange(events, startOfDay(now), horizonEnd)
+    .filter((e) => new Date(e.end_at).getTime() >= now.getTime())
+    .sort((a, b) => a.start_at.localeCompare(b.start_at))
+    .slice(0, 6);
+
+  const futureTodos = tasks
+    .filter((t) => t.status === 'pending' && t.scheduled_for > todayKey)
+    .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
+    .slice(0, 6);
+
+  return (
+    <div className="space-y-3 px-3 py-3">
+      <section>
+        <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+          Today
+        </h4>
+        <ul className="space-y-1">
+          {incompleteHabits.length === 0 && todayTodos.length === 0 ? (
+            <li className="text-[11px] italic text-zinc-400 dark:text-zinc-600">Nothing left today</li>
+          ) : (
+            <>
+              {incompleteHabits.map((h) => (
+                <li key={`h-${h.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <span aria-hidden className="h-3 w-3 shrink-0 rounded-full border-2 border-zinc-300 dark:border-zinc-600" />
+                  <span className="truncate">{h.name}</span>
+                  {h.duration_minutes != null && (
+                    <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                      {h.duration_minutes}m
+                    </span>
+                  )}
+                </li>
+              ))}
+              {todayTodos.map((t) => (
+                <li key={`t-${t.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <span aria-hidden className="h-3 w-3 shrink-0 rounded border-2 border-zinc-300 dark:border-zinc-600" />
+                  <span className="truncate">{t.title}</span>
+                  {t.duration_minutes != null && (
+                    <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                      {t.duration_minutes}m
+                    </span>
+                  )}
+                </li>
+              ))}
+            </>
+          )}
+        </ul>
+      </section>
+
+      <section>
+        <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+          Upcoming
+        </h4>
+        <ul className="space-y-1">
+          {upcomingEvents.length === 0 && futureTodos.length === 0 ? (
+            <li className="text-[11px] italic text-zinc-400 dark:text-zinc-600">Nothing upcoming</li>
+          ) : (
+            <>
+              {upcomingEvents.map((e) => {
+                const colors = PRESET_COLORS.find((c) => c.name === e.color);
+                const dotCls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-600';
+                return (
+                  <li key={e.sid}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectDate(new Date(e.start_at))}
+                      className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${dotCls}`} />
+                      {e.all_day ? (
+                        <span className="truncate">{e.title}</span>
+                      ) : (
+                        <>
+                          <span className="shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                            {fmtHM(new Date(e.start_at))}
+                          </span>
+                          <span className="truncate">{e.title}</span>
+                        </>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+              {futureTodos.map((t) => (
+                <li key={`ft-${t.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <span className="shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                    {fmtRelativeDay(t.scheduled_for)}
+                  </span>
+                  <span aria-hidden className="h-3 w-3 shrink-0 rounded border-2 border-zinc-300 dark:border-zinc-600" />
+                  <span className="truncate">{t.title}</span>
+                </li>
+              ))}
+            </>
+          )}
+        </ul>
+      </section>
     </div>
   );
 }
@@ -1479,22 +1797,30 @@ function MonthView({
 }) {
   const monthStart = startOfMonth(anchorDate);
   const monthEnd = endOfMonth(anchorDate);
-  const gridStart = startOfWeek(monthStart);
-  const gridEnd = startOfWeek(new Date(monthEnd.getTime() + 86400000));
-  // Build 6-week grid (42 cells) for stable layout
+
+  // Sunday-first grid (Outlook/Google style): start on the Sunday on/before
+  // the 1st and end on the Saturday on/after the last day. This yields 35
+  // (5 rows) or 42 (6 rows) cells, padded to a minimum of 5 rows so the
+  // grid height stays stable across short months.
+  const gridStart = new Date(monthStart);
+  gridStart.setDate(gridStart.getDate() - gridStart.getDay());
+  const gridEnd = new Date(monthEnd);
+  gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay()));
+
   const cells: Date[] = [];
   const cur = new Date(gridStart);
-  while (cur < gridEnd) {
+  while (cur <= gridEnd) {
     cells.push(new Date(cur));
     cur.setDate(cur.getDate() + 1);
   }
-  // Pad up to 42
-  while (cells.length < 42) {
+  while (cells.length < 35) {
     const last = cells[cells.length - 1];
     const next = new Date(last);
     next.setDate(next.getDate() + 1);
     cells.push(next);
   }
+  const rowCount = cells.length / 7; // 5 or 6
+
   const now = useNow();
   const today = startOfDay(now);
 
@@ -1509,14 +1835,22 @@ function MonthView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* Weekday header — full names on larger screens, short on small. */}
       <div className="grid grid-cols-7 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
-        {WEEKDAYS.map((w) => (
-          <div key={w} className="border-r border-zinc-200 px-2 py-2 text-center text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-            {w}
+        {WEEKDAYS_SUN.map((w, i) => (
+          <div key={w} className="border-r border-zinc-200 px-1 py-1.5 text-center text-[10px] font-semibold uppercase tracking-wider text-zinc-500 last:border-r-0 dark:border-zinc-800 dark:text-zinc-400">
+            <span className="hidden md:inline">{WEEKDAYS_SUN_FULL[i]}</span>
+            <span className="md:hidden">{w}</span>
           </div>
         ))}
       </div>
-      <div className="grid flex-1 grid-cols-7 grid-rows-6 overflow-y-auto">
+
+      {/* Date grid — rows floor at 78px and stretch to fill on tall
+          screens, scrolling internally when the viewport is short. */}
+      <div
+        className="grid flex-1 grid-cols-7 overflow-y-auto"
+        style={{ gridTemplateRows: `repeat(${rowCount}, minmax(78px, 1fr))` }}
+      >
         {cells.map((d, i) => {
           const isCurrentMonth = d.getMonth() === anchorDate.getMonth();
           const dayStart = startOfDay(d);
@@ -1527,52 +1861,83 @@ function MonthView({
           );
           const isToday = sameDay(d, today);
           return (
-            <button
-              type="button"
+            <div
               key={i}
               onClick={() => onDayClick(d)}
               onDoubleClick={() => onCreateQuick(d)}
-              className={`group relative flex min-h-[78px] flex-col items-start gap-1 border-r border-b border-zinc-200 p-1.5 text-left text-[10px] transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30 ${
-                isCurrentMonth ? '' : 'opacity-40'
+              className={`group relative flex min-h-0 cursor-pointer flex-col gap-0.5 border-r border-b border-zinc-200 p-1 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30 ${
+                isCurrentMonth ? '' : 'bg-zinc-50/60 dark:bg-zinc-900/30'
               }`}
             >
-              <span className={`text-xs font-semibold tabular-nums ${
-                isToday ? 'rounded-full bg-rose-500 px-1.5 py-0.5 text-white' : 'text-zinc-900 dark:text-zinc-100'
+              {/* Date number */}
+              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] tabular-nums sm:h-6 sm:w-6 sm:text-xs ${
+                isToday
+                  ? 'bg-rose-500 font-semibold text-white'
+                  : isCurrentMonth
+                  ? 'font-medium text-zinc-900 dark:text-zinc-100'
+                  : 'text-zinc-400 dark:text-zinc-600'
               }`}>
                 {d.getDate()}
               </span>
-              <div className="w-full space-y-0.5">
-                {dayEvents.slice(0, 3).map((e) => {
-                  const colors = PRESET_COLORS.find((c) => c.name === e.color);
-                  const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
-                  const isDark = !e.color;
-                  return (
-                    <div
-                      key={e.sid}
-                      role="button"
-                      onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }}
-                      className={`group/chip flex cursor-pointer items-center gap-1 truncate rounded ${cls} px-1 py-0.5 text-[10px] font-medium ${
-                        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-                      } ${e.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
-                    >
-                      {e.isVirtual && (
-                        <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                        </svg>
-                      )}
-                      <span className="truncate">{e.title}</span>
-                    </div>
-                  );
-                })}
+
+              {/* Event blocks */}
+              <div className="min-h-0 flex-1 space-y-0.5 overflow-hidden">
+                {dayEvents.slice(0, 3).map((e) => (
+                  <MonthChip
+                    key={e.sid}
+                    event={e}
+                    faded={!isCurrentMonth}
+                    onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }}
+                  />
+                ))}
                 {dayEvents.length > 3 && (
-                  <div className="text-[10px] text-zinc-500">+{dayEvents.length - 3}</div>
+                  <button
+                    type="button"
+                    onClick={(ev) => { ev.stopPropagation(); onDayClick(d); }}
+                    className={`block w-full truncate text-left text-[10px] transition-colors ${
+                      isCurrentMonth
+                        ? 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
+                        : 'text-zinc-400 dark:text-zinc-600'
+                    }`}
+                  >
+                    +{dayEvents.length - 3} more
+                  </button>
                 )}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
     </div>
+  );
+}
+
+function MonthChip({
+  event, onClick, faded,
+}: {
+  event: ExpandedEvent;
+  onClick: (e: React.MouseEvent) => void;
+  faded?: boolean;
+}) {
+  const colors = PRESET_COLORS.find((c) => c.name === event.color);
+  const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
+  const isDark = !event.color;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={event.title}
+      className={`flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] font-medium leading-tight ${cls} ${
+        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
+      } ${event.isVirtual ? 'ring-1 ring-inset ring-white/30' : ''} ${
+        faded ? 'opacity-50' : ''
+      }`}
+    >
+      {!event.all_day && (
+        <span className="shrink-0 tabular-nums opacity-80">{fmtHM(new Date(event.start_at))}</span>
+      )}
+      <span className="truncate">{event.title}</span>
+    </button>
   );
 }
 

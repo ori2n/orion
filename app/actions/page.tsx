@@ -701,7 +701,11 @@ export default function ActionsPage() {
           // here just sets `min-h-0` so the panel rides the parent
           // flex chain without triggering a page scrollbar.
           <div className="h-full min-h-0 min-w-0 flex-1">
-            <CalendarPanel refreshKey={calendarRefreshKey} />
+            <CalendarPanel
+              refreshKey={calendarRefreshKey}
+              habits={habits}
+              habitCompletions={completions}
+            />
           </div>
         )}
 

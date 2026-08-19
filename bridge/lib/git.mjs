@@ -16,13 +16,17 @@ async function run(args) {
       cwd: config.workingDir,
       windowsHide: true,
       maxBuffer: 4 * 1024 * 1024,
+      timeout: config.gitTimeoutMs,
     });
     return { ok: true, stdout: (stdout ?? '').trim(), stderr: (stderr ?? '').trim() };
   } catch (e) {
+    const timedOut = e?.killed === true;
     return {
       ok: false,
       stdout: (e?.stdout ?? '').toString().trim(),
-      stderr: ((e?.stderr ?? e?.message ?? '') + '').trim(),
+      stderr: timedOut
+        ? `git command timed out after ${config.gitTimeoutMs} ms`
+        : ((e?.stderr ?? e?.message ?? '') + '').trim(),
     };
   }
 }
