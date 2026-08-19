@@ -10,6 +10,7 @@ import {
   formatElapsed,
   taskElapsedSeconds,
   taskStatusLabel,
+  type FreebuffBridgeStatus,
   type FreebuffCommandName,
   type FreebuffPrompt,
   type FreebuffTask,
@@ -28,6 +29,17 @@ import TaskHistory from '@/components/freebuff/task-history';
 
 const VERCEL_DASHBOARD =
   process.env.NEXT_PUBLIC_VERCEL_PROJECT_URL ?? 'https://vercel.com/dashboard';
+
+/** Only a real http(s) URL counts as a captured Vercel preview link. */
+function isValidPreviewUrl(url: string | null | undefined): url is string {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 export default function FreebuffPage() {
   const [userId, setUserId] = useState<string | null>(null);
@@ -51,7 +63,11 @@ export default function FreebuffPage() {
   // Command-in-flight indicator (stop / approve / discard).
   const [commandPending, setCommandPending] = useState<FreebuffCommandName | null>(null);
 
+  // Bridge availability heartbeat (single row written by the local Bridge).
+  const [bridgeStatus, setBridgeStatus] = useState<FreebuffBridgeStatus | null>(null);
+
   const taskChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const statusChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // Wall clock for elapsed-time display (ticks once a second).
   const [now, setNow] = useState<number>(() => Date.now());
@@ -113,6 +129,45 @@ export default function FreebuffPage() {
     };
   }, [loadTasks]);
 
+  // ─── Bridge availability (single-row heartbeat from the Bridge) ─
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error: statusError } = await supabase
+        .from('freebuff_bridge_status')
+        .select('*')
+        .eq('id', 'primary')
+        .maybeSingle();
+      if (cancelled) return;
+      if (statusError) {
+        // The table may not exist yet (migration not applied). Treat as
+        // "unknown" and render nothing rather than blocking the page.
+        console.error('[freebuff] bridge status load failed:', statusError.message);
+        return;
+      }
+      setBridgeStatus((data ?? null) as FreebuffBridgeStatus | null);
+
+      const channel = supabase
+        .channel('freebuff-bridge-status')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'freebuff_bridge_status', filter: 'id=eq.primary' },
+          (payload) => {
+            setBridgeStatus((payload.new as FreebuffBridgeStatus) ?? null);
+          },
+        )
+        .subscribe();
+      statusChannelRef.current = channel;
+    })();
+    return () => {
+      cancelled = true;
+      if (statusChannelRef.current) {
+        void supabase.removeChannel(statusChannelRef.current);
+        statusChannelRef.current = null;
+      }
+    };
+  }, []);
+
   // ─── Derived task state ──────────────────────────────────────────
   const liveTask =
     tasks.find((t) => LIVE_TASK_STATUSES.has(t.status)) ?? null;
@@ -130,6 +185,8 @@ export default function FreebuffPage() {
   const isBusy = liveTask !== null;
   const isRunning = currentTask?.status === 'running';
   const isStarting = currentTask?.status === 'starting';
+  // The local Bridge reports another manual Freebuff session is running.
+  const isUnavailable = bridgeStatus?.available === false;
 
   // ─── Prompts for the current task ────────────────────────────────
   useEffect(() => {
@@ -317,26 +374,45 @@ export default function FreebuffPage() {
               Remote Controller
             </h1>
             <p className="mt-1 text-xs text-zinc-400">
-              {isBusy
-                ? 'One task is running on your PC.'
-                : 'Freebuff is idle — ready for a new task.'}
+              {isUnavailable
+                ? 'Freebuff is currently being used on this computer.'
+                : isBusy
+                  ? 'One task is running on your PC.'
+                  : 'Freebuff is idle — ready for a new task.'}
             </p>
           </div>
           <button
             type="button"
             onClick={() => {
+              if (isUnavailable) {
+                setError('Freebuff is currently being used on this computer. Finish or close that session first.');
+                return;
+              }
               if (isBusy) {
                 setError('Freebuff is busy. Finish or stop the current task first.');
                 return;
               }
               setShowNewTask((v) => !v);
             }}
-            disabled={isBusy}
+            disabled={isBusy || isUnavailable}
             className="shrink-0 rounded-lg bg-zinc-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
           >
             + New Freebuff Task
           </button>
         </header>
+
+        {/* ── Freebuff unavailable (another local session) ─────── */}
+        {isUnavailable && (
+          <div className="mb-3 flex items-start justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+            <div>
+              <div className="font-semibold">Freebuff unavailable</div>
+              <div className="mt-0.5">
+                {bridgeStatus?.reason ??
+                  'Freebuff is currently being used on this computer. Finish or close that session first.'}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Error banner ──────────────────────────────────────── */}
         {error && (
@@ -567,14 +643,20 @@ function CurrentTaskPanel({
 
         {(reviewable || task.status === 'failed') && (
           <>
-            <a
-              href={task.preview_url ?? VERCEL_DASHBOARD}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-            >
-              Open Preview
-            </a>
+            {isValidPreviewUrl(task.preview_url) ? (
+              <a
+                href={task.preview_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                Open Preview
+              </a>
+            ) : (
+              <span className="self-center text-[10px] text-zinc-400">
+                Preview not available yet
+              </span>
+            )}
             {task.status !== 'failed' && (
               <button
                 type="button"
@@ -604,10 +686,19 @@ function CurrentTaskPanel({
         )}
       </div>
 
-      {reviewable && !task.preview_url && (
+      {reviewable && !isValidPreviewUrl(task.preview_url) && (
         <p className="mt-2 text-[10px] text-zinc-400">
-          Preview auto-deploys via Vercel&apos;s Git integration — open the Vercel dashboard
-          and find the <span className="font-mono">{task.branch_name ?? 'task'}</span> branch.
+          No preview URL captured yet. Vercel deploys previews automatically from the pushed
+          branch — check the{' '}
+          <a
+            href={VERCEL_DASHBOARD}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:text-zinc-500"
+          >
+            Vercel dashboard
+          </a>{' '}
+          for <span className="font-mono">{task.branch_name ?? 'task'}</span>.
         </p>
       )}
     </section>

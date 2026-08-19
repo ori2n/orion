@@ -81,7 +81,17 @@ export interface FreebuffTerminalChunk {
   task_id: string;
   user_id: string;
   output: string;
+  /** 'output' = finalized scrollback (append); 'screen' = live snapshot (replace). */
+  kind?: 'output' | 'screen' | null;
   created_at: string;
+}
+
+/** Single-row heartbeat the Bridge writes; ORION renders availability from it. */
+export interface FreebuffBridgeStatus {
+  id: string;
+  available: boolean;
+  reason: string | null;
+  updated_at: string;
 }
 
 export type FreebuffCommandName = 'stop' | 'approve' | 'discard';

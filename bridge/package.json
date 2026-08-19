@@ -5,10 +5,12 @@
   "type": "module",
   "description": "Local Windows bridge connecting ORION/Supabase to the Freebuff CLI.",
   "scripts": {
-    "start": "node bridge.mjs"
+    "start": "node bridge.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.106.1",
+    "@xterm/headless": "^6.0.0",
     "node-pty": "^1.0.0"
   }
 }

@@ -12,9 +12,25 @@ public internet.
   `freebuff/task-<slug>-<id8>` branch, and launches `freebuff` inside a real
   Windows PTY (`node-pty`) so it can drive the same interactive TUI you use
   manually.
-- It streams terminal output back to Supabase in throttled chunks, forwards
-  queued follow-up prompts into the same session, and handles the fixed
-  `stop` / `approve` / `discard` commands.
+- It decodes the raw PTY stream through xterm.js's real terminal parser
+  (`@xterm/headless`) and streams **clean text** back to Supabase — no ANSI
+  escape codes, leaked control characters, or cursor-addressed redraws.
+  Output is stored as finalized scrollback lines (`kind = 'output'`) plus
+  the current live screen snapshot (`kind = 'screen'`).
+- It forwards queued follow-up prompts into the same session and handles
+  the fixed `stop` / `approve` / `discard` commands.
+
+## Process safety
+
+- Before starting a task the bridge detects whether Freebuff is **already
+  running** on this PC (by process name / command line, excluding its own
+  processes). If a manual session is found it does **not** kill or replace
+  it — it marks the task failed with a clear message and reports
+  `available = false` to ORION, which shows "Freebuff unavailable".
+- Before touching git it checks for uncommitted local changes. A dirty
+  working tree blocks the task so a checkout/merge/push can never carry,
+  overwrite, or publish your own local work. Paths in `IGNORE_DIRTY_PATHS`
+  (default `bridge/bridge-run.log`) are ignored.
 
 ## Security
 
@@ -71,6 +87,16 @@ npm install
 npm start
 ```
 
+## Tests
+
+The pure-logic components (terminal decoding, process detection) are unit
+-tested with Node's built-in test runner and no live Freebuff instance:
+
+```powershell
+cd bridge
+npm test
+```
+
 You should see:
 
 ```text
@@ -99,6 +125,12 @@ page on your phone.
 | `STOP_TIMEOUT_MS` | `10000` | Grace period after Ctrl+C before force-kill |
 | `TERMINAL_FLUSH_MS` | `600` | Max flush interval for terminal output |
 | `TERMINAL_MAX_CHUNKS` | `2000` | Chunks retained per task (older pruned) |
+| `TERMINAL_COLS` | `100` | PTY / decoder width (kept phone-friendly) |
+| `TERMINAL_ROWS` | `32` | PTY / decoder height |
+| `TERMINAL_SCROLLBACK` | `2000` | Decoder scrollback lines retained |
+| `PROCESS_DETECT_TIMEOUT_MS` | `8000` | Timeout for the Freebuff detection query |
+| `AVAILABILITY_INTERVAL_MS` | `10000` | How often availability is re-checked/published |
+| `IGNORE_DIRTY_PATHS` | `bridge/bridge-run.log` | Comma-separated paths ignored by the dirty-tree guard |
 | `PUSH_BRANCH` | `true` | Push task branch so Vercel builds a preview |
 | `PUSH_MAIN_ON_APPROVE` | `true` | Push `main` after Approve (production deploy) |
 | `DONE_MARKER` | *(empty)* | Optional regex that marks a task review-ready mid-session |
@@ -118,5 +150,9 @@ page on your phone.
 - If the bridge restarts while a task is `starting`/`running`, that task is
   marked `failed` on startup (the PTY handle is gone); queued tasks are
   picked up normally.
-- Preview URLs: the bridge does not call Vercel's API. Pushing the branch
-  (default) lets Vercel's Git integration build the preview automatically.
+- Preview URLs: the bridge does **not** call Vercel's API, so the task's
+  `preview_url` is currently **never populated** — ORION's "Open Preview"
+  reflects that instead of silently opening the dashboard. Pushing the branch
+  (default) lets Vercel's Git integration build the preview automatically;
+  wiring a real `preview_url` requires a Vercel API token and is a separate
+  follow-up (see the Vercel investigation notes).

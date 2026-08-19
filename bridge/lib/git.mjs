@@ -73,3 +73,13 @@ export function gitPushBranch(branch) {
 export function gitPushMain() {
   return run(['push', 'origin', config.mainBranch]);
 }
+
+/**
+ * Porcelain status lines of the working tree. Returns `{ ok, stdout, stderr }`
+ * where stdout is the raw `git status --porcelain` output (may be empty when
+ * clean). Used by the bridge's dirty-tree guard so a remote task can never
+ * checkout/merge over the user's uncommitted local work.
+ */
+export function gitStatusPorcelain() {
+  return run(['status', '--porcelain']);
+}

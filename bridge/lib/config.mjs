@@ -69,6 +69,23 @@ export const config = {
 
   terminalFlushMs: int(process.env.TERMINAL_FLUSH_MS, 600),
   terminalMaxChunks: int(process.env.TERMINAL_MAX_CHUNKS, 2000),
+  // PTY / decoder size. Kept phone-friendly (narrower than a desktop
+  // terminal) so the clean screen snapshot is readable in ORION.
+  terminalCols: int(process.env.TERMINAL_COLS, 100),
+  terminalRows: int(process.env.TERMINAL_ROWS, 32),
+  terminalScrollback: int(process.env.TERMINAL_SCROLLBACK, 2000),
+
+  // Existing-Freebuff detection (see lib/process-detection.mjs).
+  processDetectTimeoutMs: int(process.env.PROCESS_DETECT_TIMEOUT_MS, 8000),
+  // How often the bridge re-checks availability and publishes it to Supabase.
+  availabilityIntervalMs: int(process.env.AVAILABILITY_INTERVAL_MS, 10000),
+
+  // Working-tree paths that are bridge runtime artifacts and should be
+  // ignored by the dirty-tree guard (comma-separated, relative to WORKING_DIR).
+  ignoreDirtyPaths: (process.env.IGNORE_DIRTY_PATHS ?? 'bridge/bridge-run.log')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 
   pushBranch: bool(process.env.PUSH_BRANCH, true),
   pushMainOnApprove: bool(process.env.PUSH_MAIN_ON_APPROVE, true),

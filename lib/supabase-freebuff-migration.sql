@@ -31,12 +31,11 @@
 --                          └── failed    (process crashed / non-zero exit)
 ----   `completed` is reserved in the CHECK for future non-review flows and
 --   is treated by the UI as equivalent to `ready_for_review`.
---
--- Realtime: the four tables are added to the `supabase_realtime`
--- publication (section 5) so the page's `postgres_changes` subscriptions
--- fire. If you applied an earlier copy of this file before section 5
--- existed, run section 5 by itself (or re-run this whole file — it is
--- idempotent) to enable live terminal / status updates.
+----   Realtime: the freebuff tables are added to the `supabase_realtime`
+--   publication (section 6) so the page's `postgres_changes` subscriptions
+--   fire. If you applied an earlier copy of this file before section 6
+--   existed, run section 6 by itself (or re-run this whole file — it is
+--   idempotent) to enable live terminal / status updates.
 -- =====================================================================
 
 
@@ -131,6 +130,14 @@ CREATE TABLE IF NOT EXISTS freebuff_terminal_output (
 CREATE INDEX IF NOT EXISTS freebuff_terminal_output_task_created_idx
   ON freebuff_terminal_output (task_id, created_at ASC);
 
+-- Output chunks are one of two kinds:
+--   'output' — finalized scrollback lines (append-only activity log).
+--   'screen' — the current live screen snapshot (the UI replaces the
+--              previous snapshot instead of appending it).
+-- Existing rows default to 'output' so old data stays readable.
+ALTER TABLE freebuff_terminal_output
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'output';
+
 ALTER TABLE freebuff_terminal_output ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "User owns freebuff terminal output" ON freebuff_terminal_output;
@@ -174,7 +181,28 @@ CREATE POLICY "User owns freebuff commands" ON freebuff_commands
   WITH CHECK (user_id = auth.uid());
 
 
--- ─── 5. Realtime ─────────────────────────────────────────────────
+-- ─── 5. freebuff_bridge_status ──────────────────────────────────
+-- A single-row heartbeat written by the local Bridge. ORION reads it to
+-- show whether a remote task can start right now. `available = false`
+-- means another (manual) Freebuff session is running on the PC and the
+-- Bridge will not start/kill anything until it is closed. Only the Bridge
+-- (service-role key) may write this row; authenticated users may read it.
+CREATE TABLE IF NOT EXISTS freebuff_bridge_status (
+  id         TEXT PRIMARY KEY DEFAULT 'primary',
+  available  BOOLEAN NOT NULL DEFAULT true,
+  reason     TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE freebuff_bridge_status ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Authenticated users can read bridge status" ON freebuff_bridge_status;
+CREATE POLICY "Authenticated users can read bridge status" ON freebuff_bridge_status
+  FOR SELECT TO authenticated
+  USING (true);
+
+
+-- ─── 6. Realtime ─────────────────────────────────────────────────
 -- The ORION page subscribes to `postgres_changes` on these tables for
 -- live status / prompt / terminal updates. Supabase only publishes WAL
 -- changes for tables that are members of the `supabase_realtime`
@@ -205,6 +233,11 @@ BEGIN
                    WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
                      AND tablename = 'freebuff_commands') THEN
       ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_commands;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                   WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
+                     AND tablename = 'freebuff_bridge_status') THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE freebuff_bridge_status;
     END IF;
   END IF;
 END $$;

@@ -79,7 +79,14 @@ export default function TaskHistory({ tasks }: { tasks: FreebuffTask[] }) {
     }
     setPrompts((promptRes.data ?? []) as FreebuffPrompt[]);
     const chunks = ((termRes.data ?? []) as FreebuffTerminalChunk[]).slice().reverse();
-    setTerminalText(chunks.map((c) => c.output).join(''));
+    // Rebuild the terminal view: finalized scrollback lines plus the final
+    // live-screen snapshot (screen chunks replace, so keep only the last).
+    const scrollback = chunks
+      .filter((c) => (c.kind ?? 'output') !== 'screen')
+      .map((c) => c.output)
+      .join('\n');
+    const screen = [...chunks].reverse().find((c) => c.kind === 'screen')?.output ?? '';
+    setTerminalText(scrollback + (scrollback && screen ? '\n\n' : '') + screen);
     setDetailLoading(false);
   }, []);
 

@@ -102,7 +102,16 @@ export default function TerminalOutput({
     if (atBottomRef.current) scrollToBottom('auto');
   }, [chunks, scrollToBottom]);
 
-  const text = chunks.map((c) => c.output).join('');
+  // 'output' chunks are the finalized scrollback log (append in order); a
+  // 'screen' chunk is the live viewport snapshot, which replaces the
+  // previous snapshot instead of being appended.
+  const scrollbackText = chunks
+    .filter((c) => (c.kind ?? 'output') !== 'screen')
+    .map((c) => c.output)
+    .join('\n');
+  const screenChunk = [...chunks].reverse().find((c) => c.kind === 'screen');
+  const screenText = screenChunk?.output ?? '';
+  const hasContent = scrollbackText.length > 0 || screenText.length > 0;
   const isAtBottom = atBottomRef.current;
 
   return (
@@ -113,7 +122,7 @@ export default function TerminalOutput({
         <span className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
           Terminal output
         </span>
-        {!isAtBottom && text.length > 0 && (
+        {!isAtBottom && hasContent && (
           <button
             type="button"
             onClick={() => {
@@ -136,12 +145,16 @@ export default function TerminalOutput({
           <div className="flex h-full items-center justify-center text-zinc-600">
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
           </div>
-        ) : text.length === 0 ? (
+        ) : !hasContent ? (
           <div className="flex h-full items-center justify-center text-zinc-600">
             Waiting for output…
           </div>
         ) : (
-          <pre className="whitespace-pre-wrap break-words font-mono">{text}</pre>
+          <pre className="whitespace-pre-wrap break-words font-mono">
+            {scrollbackText}
+            {scrollbackText && screenText ? '\n\n' : ''}
+            {screenText && <span className="text-zinc-100">{screenText}</span>}
+          </pre>
         )}
       </div>
     </div>

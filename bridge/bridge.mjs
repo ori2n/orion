@@ -4,6 +4,8 @@ import { promisify } from 'node:util';
 import pty from 'node-pty';
 import { assertConfig, config } from './lib/config.mjs';
 import { getSupabase } from './lib/supabase.mjs';
+import { decoderFromConfig } from './lib/terminal-decoder.mjs';
+import { detectFreebuffInstances } from './lib/process-detection.mjs';
 import {
   gitChangedFiles,
   gitCheckoutMain,
@@ -13,6 +15,7 @@ import {
   gitPushBranch,
   gitPushMain,
   gitRevParseHead,
+  gitStatusPorcelain,
 } from './lib/git.mjs';
 
 /**
@@ -203,19 +206,53 @@ function stopFlushTimer() {
 
 async function flushOutput(final) {
   const a = state.active;
-  if (!a || !a.outputBuffer) return;
-  const chunk = a.outputBuffer;
-  a.outputBuffer = '';
+  if (!a || !a.decoder) return;
+
+  // Ensure every write already fed to the decoder has been parsed before
+  // the final snapshot, so the tail of the stream is not lost on exit.
+  if (final) await a.decoder.ready();
+
+  const { scrollback, live } = a.decoder.snapshot();
+  const rows = [];
+
+  // Finalized scrollback lines are appendable activity log.
+  if (scrollback.length) {
+    rows.push({
+      task_id: a.taskId,
+      user_id: a.userId,
+      kind: 'output',
+      output: scrollback.join('\n'),
+    });
+    // The optional done marker is matched against the decoded (clean)
+    // text — not the raw ANSI stream — so it matches what is displayed.
+    if (config.doneMarker && !a.doneMarked) {
+      for (const line of scrollback) {
+        if (config.doneMarker.test(line)) {
+          a.doneMarked = true;
+          log('info', 'Done marker matched — no further follow-ups will be auto-sent.');
+          break;
+        }
+      }
+    }
+  }
+
+  // The current visible screen is a live snapshot (the browser replaces the
+  // previous one rather than appending it).
+  if (live.length) {
+    rows.push({
+      task_id: a.taskId,
+      user_id: a.userId,
+      kind: 'screen',
+      output: live.join('\n'),
+    });
+  }
+
+  if (!rows.length) return;
+
   const sb = getSupabase();
-  const { error } = await sb.from('freebuff_terminal_output').insert({
-    task_id: a.taskId,
-    user_id: a.userId,
-    output: chunk,
-  });
+  const { error } = await sb.from('freebuff_terminal_output').insert(rows);
   if (error) {
     log('error', `terminal output insert failed: ${error.message}`);
-    // Put it back so we don't silently drop output.
-    a.outputBuffer = chunk + a.outputBuffer;
   } else if (!final) {
     await pruneOutput(a.taskId);
   }
@@ -250,8 +287,8 @@ function spawnSession(task) {
 
   const proc = pty.spawn(shell, shellArgs, {
     name: 'xterm-color',
-    cols: 160,
-    rows: 50,
+    cols: config.terminalCols,
+    rows: config.terminalRows,
     cwd: config.workingDir,
     env: process.env,
   });
@@ -260,14 +297,10 @@ function spawnSession(task) {
   if (a) a.pid = proc.pid;
   proc.onData((data) => {
     if (!a || a.proc !== proc) return;
-    a.outputBuffer += data;
+    // Feed the raw bytes to the terminal decoder; it resolves ANSI/TUI
+    // output into clean text that flushOutput() reads back.
+    a.decoder.write(data);
     a.lastOutputAt = Date.now();
-    // Optional done marker only stops auto follow-ups; completion is
-    // still driven by process exit (see README).
-    if (config.doneMarker && !a.doneMarked && config.doneMarker.test(a.outputBuffer)) {
-      a.doneMarked = true;
-      log('info', 'Done marker matched — no further follow-ups will be auto-sent.');
-    }
   });
 
   proc.onExit(({ exitCode }) => {
@@ -344,7 +377,15 @@ async function handleExit(exitCode) {
 
 function cleanup() {
   stopFlushTimer();
+  const a = state.active;
   state.active = null;
+  if (a?.decoder) {
+    try {
+      a.decoder.dispose();
+    } catch {
+      // ignore
+    }
+  }
   setStatusLine('Idle');
 }
 
@@ -385,6 +426,43 @@ async function maybeStartNextTask() {
   const task = data?.[0];
   if (!task) return;
   log('info', `Task detected: "${task.title}" (${task.id.slice(0, 8)})`);
+
+  // ── Safety gate 1: never kill/replace an existing Freebuff session ──
+  // A user may be running Freebuff manually in their own PowerShell. If
+  // so, we must NOT start (or kill) anything — only report "busy".
+  const existing = await detectFreebuffInstances();
+  if (existing.length) {
+    const names = existing.map((p) => `${p.name} (pid ${p.pid})`).join(', ');
+    log('warn', `FREEBUFF BUSY — another Freebuff session is running (${names}); task ${task.id.slice(0, 8)} blocked.`);
+    await publishAvailability(false, 'Another Freebuff session is already running on this PC. Finish or close it before starting a remote task.');
+    await failTask(
+      task.id,
+      'Freebuff is already running on this PC (another session). Finish or close it before starting a remote task.',
+    );
+    return;
+  }
+
+  // ── Safety gate 2: protect uncommitted local work ──
+  // The workflow checks out main and creates a branch; doing that over a
+  // dirty tree could carry, merge, or push the user's own uncommitted
+  // changes. Refuse instead — never touch local work implicitly.
+  const status = await gitStatusPorcelain();
+  if (!status.ok) {
+    log('error', `git status failed: ${status.stderr}`);
+    await failTask(task.id, `Could not check the working tree: ${status.stderr}`);
+    return;
+  }
+  const dirtyPaths = parseDirtyPaths(status.stdout);
+  const blocking = dirtyPaths.filter((p) => !config.ignoreDirtyPaths.includes(p));
+  if (blocking.length) {
+    const preview = blocking.slice(0, 5).join(', ') + (blocking.length > 5 ? '…' : '');
+    log('warn', `Working tree has uncommitted changes (${preview}) — task blocked to protect local work.`);
+    await failTask(
+      task.id,
+      `Local working tree has uncommitted changes (${preview}). Commit or stash them before starting a remote task.`,
+    );
+    return;
+  }
 
   const sessionId = randomUUID();
   const startedAt = new Date().toISOString();
@@ -446,7 +524,7 @@ async function maybeStartNextTask() {
     sessionId,
     branchName,
     pid: null,
-    outputBuffer: '',
+    decoder: decoderFromConfig(config),
     lastOutputAt: Date.now(),
     stoppedByUser: false,
     exited: false,
@@ -685,6 +763,85 @@ async function processFollowUps() {
   log('info', `Sent follow-up: ${prompt.prompt.slice(0, 60)}`);
 }
 
+// ─── Availability + process detection helpers ─────────────────────
+
+/** Parse `git status --porcelain` output into a list of changed paths. */
+function parseDirtyPaths(porcelainOutput) {
+  const paths = [];
+  for (const raw of (porcelainOutput ?? '').split('\n')) {
+    if (!raw) continue;
+    let p = raw.slice(3).trim();
+    // Porcelain C-quotes paths containing spaces/special characters.
+    if (p.startsWith('"') && p.endsWith('"')) {
+      p = p.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+    if (p) paths.push(p);
+  }
+  return paths;
+}
+
+/** Write the bridge's availability to the single-row status table. */
+async function publishAvailability(available, reason) {
+  const sb = getSupabase();
+  const { error } = await sb.from('freebuff_bridge_status').upsert(
+    {
+      id: 'primary',
+      available,
+      reason,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'id' },
+  );
+  if (error) log('warn', `availability publish failed: ${error.message}`);
+}
+
+/**
+ * Whether a remote task may start right now. While this bridge owns a
+ * running task it is considered available (ORION already renders that
+ * task); only an idle bridge can be blocked by a manual Freebuff session.
+ */
+async function computeAvailability() {
+  if (state.active) return { available: true, reason: null };
+  try {
+    const existing = await detectFreebuffInstances();
+    if (existing.length) {
+      return {
+        available: false,
+        reason:
+          'Another Freebuff session is already running on this PC. Finish or close it before starting a remote task.',
+      };
+    }
+  } catch {
+    // Detection failure → fail open (treat as free).
+  }
+  return { available: true, reason: null };
+}
+
+/** Publish availability on a timer so ORION can show "unavailable". */
+async function runAvailabilityLoop() {
+  await publishAvailability(true, null);
+  let lastKey = 'true|';
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    await sleep(config.availabilityIntervalMs);
+    try {
+      const avail = await computeAvailability();
+      const key = `${avail.available}|${avail.reason ?? ''}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        await publishAvailability(avail.available, avail.reason);
+        if (!avail.available) {
+          log('warn', 'FREEBUFF BUSY — another Freebuff session is running; remote tasks are blocked until it is closed.');
+        } else {
+          log('info', 'Freebuff available.');
+        }
+      }
+    } catch (e) {
+      log('error', `availability check failed: ${e?.message ?? e}`);
+    }
+  }
+}
+
 // ─── Startup reconcile + main loop ────────────────────────────────
 
 async function reconcileOnStartup() {
@@ -758,7 +915,7 @@ async function main() {
   await reconcileOnStartup();
   log('info', `Polling started — tasks every ${config.pollIntervalMs} ms, commands every ${config.commandPollMs} ms`);
 
-  await Promise.all([runCommandLoop(), runTaskLoop()]);
+  await Promise.all([runCommandLoop(), runTaskLoop(), runAvailabilityLoop()]);
 }
 
 process.on('SIGINT', () => {
