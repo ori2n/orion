@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { signOut } from '@/app/auth/actions';
 
@@ -39,12 +40,12 @@ export default function AuthButton() {
 
   if (!email) {
     return (
-      <a
+      <Link
         href="/login"
         className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
       >
         Sign In
-      </a>
+      </Link>
     );
   }
 

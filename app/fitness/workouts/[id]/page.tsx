@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { redirect, notFound } from 'next/navigation';
 import { getCurrentUserIdServer } from '@/lib/auth-server';
+import { createClient } from '@/lib/supabase/server';
 import { getHevyWorkoutDetail } from '@/lib/fitness/hevy/history';
 import WorkoutDetailView from '@/components/fitness/workout-detail-view';
 
@@ -24,7 +25,8 @@ export default async function WorkoutDetailPage({
   const userId = await getCurrentUserIdServer();
   if (!userId) redirect('/login');
   const { id } = await params;
-  const detail = await getHevyWorkoutDetail(userId, id);
+  const db = await createClient();
+  const detail = await getHevyWorkoutDetail(userId, id, db);
   if (!detail) notFound();
   return <WorkoutDetailView detail={detail} />;
 }

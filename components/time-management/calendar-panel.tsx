@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * CalendarPanel — full v2 calendar for /actions.
+ * CalendarPanel — full v2 calendar for /time-management.
  *
  * Replaces the previous tiny `CalendarTodayPanel` placeholder with the
  * redesigned UI: Day/Week/Month views, click-and-drag to create, drag
@@ -1011,7 +1011,10 @@ function TodayUpcoming({
     .slice(0, 6);
 
   const futureTodos = tasks
-    .filter((t) => t.status === 'pending' && t.scheduled_for > todayKey)
+    .filter(
+      (t): t is Task & { scheduled_for: string } =>
+        t.status === 'pending' && t.scheduled_for != null && t.scheduled_for > todayKey,
+    )
     .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
     .slice(0, 6);
 

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { redirect, notFound } from 'next/navigation';
 import { getCurrentUserIdServer } from '@/lib/auth-server';
+import { createClient } from '@/lib/supabase/server';
 import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
 import { isMuscle } from '@/lib/fitness/hevy/muscle-data';
 import MuscleDetailView from '@/components/fitness/muscle-detail-view';
@@ -27,7 +28,8 @@ export default async function MusclePage({
   const { muscle } = await params;
   const decoded = decodeURIComponent(muscle);
   if (!isMuscle(decoded) && decoded !== 'Unmapped') notFound();
-  const calcs = await computeHevyCalculations(userId);
+  const db = await createClient();
+  const calcs = await computeHevyCalculations(userId, undefined, db);
   const summary = calcs.muscles.find((m) => m.muscle === decoded);
   if (!summary) notFound();
   return <MuscleDetailView muscle={decoded} summary={summary} />;

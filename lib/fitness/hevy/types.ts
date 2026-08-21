@@ -100,6 +100,7 @@ export interface HevyDeleteImportResult {
 export interface HevyWorkoutDetail {
   id: string;
   title: string | null;
+  description: string | null;
   sourceStartTime: string;
   startTime: string | null;
   exercises: Array<{

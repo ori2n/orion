@@ -7,6 +7,7 @@
  * tested in isolation; this module is the thin DB layer.
  */
 import { supabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { listExerciseMeta, type Muscle } from './muscles';
 import {
   listMuscleTargets,
@@ -94,6 +95,7 @@ function bandOnTarget(
 export async function computeHevyCalculations(
   userId: string | null,
   targetsOverride?: HevyMuscleTarget[] | null,
+  db: SupabaseClient = supabase,
 ): Promise<HevyCalculations> {
   const empty: HevyCalculations = {
     exercises: [],
@@ -107,18 +109,16 @@ export async function computeHevyCalculations(
 
   try {
     const [workouts, exercises, sets, meta, storedTargets] = await Promise.all([
-      supabase.from('hevy_workouts').select('id, start_time').eq('user_id', userId),
-      supabase
-        .from('hevy_workout_exercises')
+      db.from('hevy_workouts').select('id, start_time').eq('user_id', userId),
+      db.from('hevy_workout_exercises')
         .select('id, workout_id, name')
         .eq('user_id', userId),
-      supabase
-        .from('hevy_workout_sets')
+      db.from('hevy_workout_sets')
         .select('workout_exercise_id, weight_kg, reps')
         .eq('user_id', userId),
-      listExerciseMeta(userId),
+      listExerciseMeta(userId, db),
       targetsOverride === undefined
-        ? listMuscleTargets(userId)
+        ? listMuscleTargets(userId, db)
         : Promise.resolve(targetsOverride ?? []),
     ]);
 
@@ -170,8 +170,13 @@ export async function computeHevyCalculations(
     >();
     // Week → {volume, sets, sessions} for the global weekly series.
     const weekly = new Map<string, { volume: number; sets: number; sessions: Set<string> }>();
-    // muscle → week → point.
-    const muscleWeekly = new Map<string, Map<string, MuscleWeeklyPoint>>();
+    // muscle → week → accumulator. `sessions` is a Set of distinct training
+    // day keys so multiple exercises/sets for the same muscle on the same
+    // date count as a single training day.
+    const muscleWeekly = new Map<
+      string,
+      Map<string, { week: string; sets: number; sessions: Set<string>; volumeKg: number }>
+    >();
 
     for (const s of (sets.data ?? []) as SetRow[]) {
       const name = exName.get(s.workout_exercise_id);
@@ -215,10 +220,17 @@ export async function computeHevyCalculations(
           mw = new Map();
           muscleWeekly.set(mKey, mw);
         }
-        const mp = mw.get(week) ?? { week, sets: 0, sessions: 0, volumeKg: 0 };
+        const mp = mw.get(week) ?? {
+          week,
+          sets: 0,
+          sessions: new Set<string>(),
+          volumeKg: 0,
+        };
         mp.sets += 1;
         mp.volumeKg = Math.round((mp.volumeKg + volume) * 100) / 100;
-        if (workoutId) mp.sessions += 1;
+        // Count each DISTINCT training day once per muscle — multiple sets
+        // or exercises on the same date are one training day.
+        if (date) mp.sessions.add(date.toISOString().slice(0, 10));
         mw.set(week, mp);
       }
       agg.set(name, a);
@@ -259,9 +271,14 @@ export async function computeHevyCalculations(
     for (const m of MUSCLE_ORDER) {
       const mw = muscleWeekly.get(m);
       if (!mw) continue;
-      const points: MuscleWeeklyPoint[] = [...mw.values()].sort((a, b) =>
-        a.week.localeCompare(b.week),
-      );
+      const points: MuscleWeeklyPoint[] = [...mw.values()]
+        .map((p) => ({
+          week: p.week,
+          sets: p.sets,
+          sessions: p.sessions.size,
+          volumeKg: p.volumeKg,
+        }))
+        .sort((a, b) => a.week.localeCompare(b.week));
       const totalSets = points.reduce((n, p) => n + p.sets, 0);
       const totalVolume = points.reduce((n, p) => n + p.volumeKg, 0);
       const tgt = targetBy.get(m);

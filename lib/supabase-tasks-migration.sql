@@ -13,10 +13,17 @@ CREATE TABLE IF NOT EXISTS tasks (
   user_id UUID DEFAULT auth.uid() NOT NULL,
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
-  scheduled_for DATE NOT NULL,
+  scheduled_for DATE,
   duration_minutes INTEGER,
+  notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- For databases created before the notes column was added.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notes TEXT;
+
+-- Make the task day/date optional (undated tasks → Upcoming).
+ALTER TABLE tasks ALTER COLUMN scheduled_for DROP NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_for ON tasks(scheduled_for);

@@ -1,7 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { getTasks, insertTask, toggleTaskStatus, deleteTask as deleteTaskApi, rescheduleTask } from '@/lib/tasks';
+import {
+  getTasks,
+  insertTask,
+  updateTask,
+  toggleTaskStatus,
+  deleteTask as deleteTaskApi,
+  rescheduleTask,
+} from '@/lib/tasks';
 import type { Task } from '@/lib/tasks';
 import {
   buildEventFromTask,
@@ -29,6 +36,13 @@ type Section = 'overdue' | 'today' | 'tomorrow' | 'upcoming';
 
 type Bucket = { label: string; section: Section };
 
+type EditPatch = {
+  title?: string;
+  scheduled_for?: string | null;
+  duration_minutes?: number | null;
+  notes?: string | null;
+};
+
 function getBuckets(): Bucket[] {
   return [
     { label: 'Overdue', section: 'overdue' },
@@ -38,7 +52,8 @@ function getBuckets(): Bucket[] {
   ];
 }
 
-function getSectionFromDate(dateStr: string): Section {
+function getSectionFromDate(dateStr: string | null): Section {
+  if (!dateStr) return 'upcoming';
   const t = today();
   if (dateStr < t) return 'overdue';
   if (dateStr === t) return 'today';
@@ -56,7 +71,9 @@ export default function TodoList() {
   // New task form state
   const [title, setTitle] = useState('');
   const [scheduledFor, setScheduledFor] = useState(today());
+  const [noDate, setNoDate] = useState(false);
   const [duration, setDuration] = useState(30);
+  const [notes, setNotes] = useState('');
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   // Load tasks from Supabase on mount
@@ -77,8 +94,9 @@ export default function TodoList() {
 
     const result = await insertTask({
       title: title.trim(),
-      scheduled_for: scheduledFor,
+      scheduled_for: noDate ? null : scheduledFor,
       duration_minutes: duration,
+      notes: notes.trim() || null,
     });
 
     if (result.error) {
@@ -92,6 +110,8 @@ export default function TodoList() {
 
     setTitle('');
     setDuration(30);
+    setNotes('');
+    setNoDate(false);
   }
 
   async function toggleTask(id: string) {
@@ -155,6 +175,22 @@ export default function TodoList() {
     [],
   );
 
+  const editTask = useCallback(async (taskId: string, patch: EditPatch) => {
+    // Optimistic update — notes are part of the patch so they are
+    // preserved alongside any title/date/duration edits.
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, ...patch } : t)),
+    );
+
+    const success = await updateTask(taskId, patch);
+    if (!success) {
+      setError('Failed to update task');
+      // Reload from server on failure
+      const data = await getTasks();
+      setTasks(data);
+    }
+  }, []);
+
   // Group tasks by section
   const grouped = getBuckets().map((bucket) => {
     const items = tasks
@@ -162,7 +198,7 @@ export default function TodoList() {
       .sort((a, b) => {
         // Completed tasks at bottom
         if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
-        return a.scheduled_for.localeCompare(b.scheduled_for);
+        return (a.scheduled_for ?? '').localeCompare(b.scheduled_for ?? '');
       });
     return { ...bucket, tasks: items };
   });
@@ -203,9 +239,6 @@ export default function TodoList() {
     );
   }
 
-  const totalPending = tasks.filter((t) => t.status === 'pending').length;
-  const hasAnyPending = totalPending > 0;
-
   return (
     <div>
       {/* Error banner */}
@@ -226,7 +259,8 @@ export default function TodoList() {
         <h2 className="mb-5 text-sm font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
           New Task
         </h2>
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-3">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-3">
           <div className="flex-1">
             <label htmlFor="task-title" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
               Title
@@ -249,9 +283,21 @@ export default function TodoList() {
               id="task-date"
               type="date"
               value={scheduledFor}
+              disabled={noDate}
               onChange={(e) => setScheduledFor(e.target.value)}
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
+              className={`w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700 ${
+                noDate ? 'cursor-not-allowed opacity-50' : ''
+              }`}
             />
+            <label className="mt-1.5 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+              <input
+                type="checkbox"
+                checked={noDate}
+                onChange={(e) => setNoDate(e.target.checked)}
+                className="h-3.5 w-3.5 accent-zinc-900 dark:accent-zinc-100"
+              />
+              No date
+            </label>
           </div>
           <div className="w-full sm:w-28">
             <label htmlFor="task-duration" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
@@ -277,40 +323,43 @@ export default function TodoList() {
             </svg>
             Add
           </button>
+          </div>
+
+          <div>
+            <label htmlFor="task-notes" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+              Notes (optional)
+            </label>
+            <textarea
+              id="task-notes"
+              rows={2}
+              placeholder="Add details, context, or sub-steps…"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
+            />
+          </div>
         </div>
       </section>
 
-      {/* Section-grouped rows */}
-      {!hasAnyPending ? (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="mb-4 rounded-full bg-zinc-100 p-4 dark:bg-zinc-800">
-            <svg className="h-8 w-8 text-zinc-300 dark:text-zinc-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15a2.25 2.25 0 012.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
-            </svg>
-          </div>
-          <p className="text-sm text-zinc-400 dark:text-zinc-500">
-            No tasks yet — create your first one above.
-          </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
-          {grouped.map((bucket) => (
-            <TaskRow
-              key={bucket.section}
-              label={bucket.label}
-              section={bucket.section}
-              tasks={bucket.tasks}
-              draggedId={draggedId}
-              onDragStart={handleDragStart}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
-              onDragEnd={handleDragEnd}
-              onToggle={toggleTask}
-              onDelete={deleteTask}
-            />
-          ))}
-        </div>
-      )}
+      {/* Section-grouped rows — all four categories always visible, even when empty. */}
+      <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
+        {grouped.map((bucket) => (
+          <TaskRow
+            key={bucket.section}
+            label={bucket.label}
+            section={bucket.section}
+            tasks={bucket.tasks}
+            draggedId={draggedId}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            onDragEnd={handleDragEnd}
+            onToggle={toggleTask}
+            onDelete={deleteTask}
+            onUpdate={editTask}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -328,6 +377,7 @@ function TaskRow({
   onDragEnd,
   onToggle,
   onDelete,
+  onUpdate,
 }: {
   label: string;
   section: Section;
@@ -339,6 +389,7 @@ function TaskRow({
   onDragEnd: () => void;
   onToggle: (id: string) => void;
   onDelete: (id: string) => void;
+  onUpdate: (id: string, patch: EditPatch) => void;
 }) {
   const isOverdue = section === 'overdue';
   const isToday = section === 'today';
@@ -421,6 +472,7 @@ function TaskRow({
               onDragEnd={onDragEnd}
               onToggle={onToggle}
               onDelete={onDelete}
+              onUpdate={onUpdate}
             />
           ))
         )}
@@ -438,6 +490,7 @@ function TaskCard({
   onDragEnd,
   onToggle,
   onDelete,
+  onUpdate,
 }: {
   task: Task;
   draggedId: string | null;
@@ -445,6 +498,7 @@ function TaskCard({
   onDragEnd: () => void;
   onToggle: (id: string) => void;
   onDelete: (id: string) => void;
+  onUpdate: (id: string, patch: EditPatch) => void;
 }) {
   const isCompleted = task.status === 'completed';
   const isDragging = draggedId === task.id;
@@ -459,7 +513,43 @@ function TaskCard({
   const [calFeedback, setCalFeedback] = useState<string | null>(null);
   const [calError, setCalError] = useState<string | null>(null);
 
+  // Inline edit state — notes are edited alongside title/date/duration
+  // so they are always preserved across an edit.
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(task.title);
+  const [editDate, setEditDate] = useState<string>(task.scheduled_for ?? '');
+  const [editDuration, setEditDuration] = useState<number>(
+    task.duration_minutes ?? 30,
+  );
+  const [editNotes, setEditNotes] = useState(task.notes ?? '');
+
+  function startEdit() {
+    setEditTitle(task.title);
+    setEditDate(task.scheduled_for ?? '');
+    setEditDuration(task.duration_minutes ?? 30);
+    setEditNotes(task.notes ?? '');
+    setCalOpen(false);
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+  }
+
+  function saveEdit() {
+    const trimmedTitle = editTitle.trim();
+    if (!trimmedTitle) return;
+    onUpdate(task.id, {
+      title: trimmedTitle,
+      scheduled_for: editDate || null,
+      duration_minutes: editDuration,
+      notes: editNotes.trim() || null,
+    });
+    setEditing(false);
+  }
+
   async function handleAddToCalendar() {
+    if (!task.scheduled_for) return;
     setCalError(null);
     setCalFeedback(null);
     setCalSaving(true);
@@ -488,7 +578,7 @@ function TaskCard({
 
   return (
     <div
-      draggable
+      draggable={!editing}
       onDragStart={(e) => onDragStart(e, task.id)}
       onDragEnd={onDragEnd}
       className={`group cursor-grab rounded-lg border p-3 transition-all duration-200 active:cursor-grabbing ${
@@ -518,73 +608,165 @@ function TaskCard({
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          <p
-            className={`text-sm font-medium transition-colors duration-200 ${
-              isCompleted
-                ? 'text-zinc-400 line-through dark:text-zinc-500'
-                : 'text-zinc-900 dark:text-zinc-100'
-            }`}
-          >
-            {task.title}
-          </p>
-          {task.duration_minutes != null && (
-            <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-              {task.duration_minutes}m
-            </p>
+          {editing ? (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && saveEdit()}
+                placeholder="Task title"
+                autoFocus
+                className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="block">
+                  <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Date</span>
+                  <input
+                    type="date"
+                    value={editDate}
+                    onChange={(e) => setEditDate(e.target.value)}
+                    className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Minutes</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={480}
+                    value={editDuration}
+                    onChange={(e) => setEditDuration(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Notes (optional)</span>
+                <textarea
+                  rows={2}
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  placeholder="Add details…"
+                  className="mt-0.5 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </label>
+              <div className="flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={cancelEdit}
+                  className="rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={!editTitle.trim()}
+                  className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p
+                className={`text-sm font-medium transition-colors duration-200 ${
+                  isCompleted
+                    ? 'text-zinc-400 line-through dark:text-zinc-500'
+                    : 'text-zinc-900 dark:text-zinc-100'
+                }`}
+              >
+                {task.title}
+              </p>
+              {task.duration_minutes != null && (
+                <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                  {task.duration_minutes}m
+                </p>
+              )}
+              {task.notes ? (
+                <p className="mt-1 whitespace-pre-wrap text-xs text-zinc-500 dark:text-zinc-400">
+                  {task.notes}
+                </p>
+              ) : null}
+            </>
           )}
         </div>
 
-        {/* Drag handle */}
-        <svg
-          className="mt-0.5 h-4 w-4 shrink-0 text-zinc-200 opacity-0 transition-all group-hover:opacity-100 dark:text-zinc-600"
-          fill="none"
-          viewBox="0 0 24 24"
-          strokeWidth={1.5}
-          stroke="currentColor"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-        </svg>
+        {/* Action buttons (hidden while editing) */}
+        {!editing && (
+          <>
+            {/* Drag handle */}
+            <svg
+              className="mt-0.5 h-4 w-4 shrink-0 text-zinc-200 opacity-0 transition-all group-hover:opacity-100 dark:text-zinc-600"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+            </svg>
 
-        {/* Add to calendar */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setCalOpen((v) => !v);
-            setCalFeedback(null);
-            setCalError(null);
-          }}
-          onDragStart={(e) => e.stopPropagation()}
-          title="Add this task to the calendar (creates a new event)"
-          aria-label={`Add ${task.title} to the calendar`}
-          aria-expanded={calOpen}
-          className={`shrink-0 rounded-md p-0.5 transition-all ${
-            calOpen
-              ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-950/30 dark:text-rose-400 dark:ring-rose-900'
-              : 'text-zinc-200 opacity-0 hover:text-rose-500 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-rose-400'
-          }`}
-        >
-          <svg
-            className="h-3.5 w-3.5"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={2}
-            stroke="currentColor"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
-        </button>
+            {/* Edit */}
+            <button
+              onClick={startEdit}
+              className="shrink-0 rounded-md p-0.5 text-zinc-200 opacity-0 transition-all hover:text-zinc-700 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-zinc-300"
+              aria-label="Edit task"
+              onDragStart={(e) => e.stopPropagation()}
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
 
-        {/* Delete */}
-        <button
-          onClick={() => onDelete(task.id)}
-          className="shrink-0 rounded-md p-0.5 text-zinc-200 opacity-0 transition-all hover:text-red-500 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-red-400"
-          aria-label="Delete task"
-          onDragStart={(e) => e.stopPropagation()}
-        >
-          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+            {/* Add to calendar */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setCalOpen((v) => !v);
+                setCalFeedback(null);
+                setCalError(null);
+              }}
+              onDragStart={(e) => e.stopPropagation()}
+              disabled={!task.scheduled_for}
+              title={
+                task.scheduled_for
+                  ? 'Add this task to the calendar (creates a new event)'
+                  : 'Set a date before adding this task to the calendar'
+              }
+              aria-label={`Add ${task.title} to the calendar`}
+              aria-expanded={calOpen}
+              className={`shrink-0 rounded-md p-0.5 transition-all ${
+                calOpen
+                  ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-950/30 dark:text-rose-400 dark:ring-rose-900'
+                  : 'text-zinc-200 opacity-0 hover:text-rose-500 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-rose-400'
+              }`}
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </button>
+
+            {/* Delete */}
+            <button
+              onClick={() => onDelete(task.id)}
+              className="shrink-0 rounded-md p-0.5 text-zinc-200 opacity-0 transition-all hover:text-red-500 group-hover:opacity-100 dark:text-zinc-600 dark:hover:text-red-400"
+              aria-label="Delete task"
+              onDragStart={(e) => e.stopPropagation()}
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </>
+        )}
       </div>
 
       <div
@@ -616,7 +798,7 @@ function TaskCard({
               <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">Date</span>
               <input
                 type="text"
-                value={task.scheduled_for}
+                value={task.scheduled_for ?? ''}
                 readOnly
                 className="mt-0.5 w-full cursor-default rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
               />

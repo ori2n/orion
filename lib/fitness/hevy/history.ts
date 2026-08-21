@@ -13,6 +13,7 @@
  * on via FK cascade) so counts are exact and RLS-safe.
  */
 import { supabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   HevyDeleteImportResult,
   HevyImportRecord,
@@ -205,18 +206,19 @@ export async function listHevyWorkouts(
 export async function getHevyWorkoutDetail(
   userId: string | null,
   workoutId: string,
+  db: SupabaseClient = supabase,
 ): Promise<HevyWorkoutDetail | null> {
   if (!userId) return null;
   try {
-    const { data: workout, error: wErr } = await supabase
+    const { data: workout, error: wErr } = await db
       .from('hevy_workouts')
-      .select('id, title, source_start_time, start_time')
+      .select('id, title, description, source_start_time, start_time')
       .eq('user_id', userId)
       .eq('id', workoutId)
       .single();
     if (wErr || !workout) return null;
 
-    const { data: exercises, error: eErr } = await supabase
+    const { data: exercises, error: eErr } = await db
       .from('hevy_workout_exercises')
       .select('id, name, order_index')
       .eq('user_id', userId)
@@ -227,7 +229,7 @@ export async function getHevyWorkoutDetail(
     const exIds = ((exercises ?? []) as Array<{ id: string }>).map((e) => e.id);
     const setsByEx = new Map<string, HevyWorkoutDetail['exercises'][number]['sets']>();
     if (exIds.length > 0) {
-      const { data: sets, error: sErr } = await supabase
+      const { data: sets, error: sErr } = await db
         .from('hevy_workout_sets')
         .select('workout_exercise_id, set_index, weight_kg, reps, duration_seconds')
         .eq('user_id', userId)
@@ -255,6 +257,7 @@ export async function getHevyWorkoutDetail(
     return {
       id: (workout as { id: string }).id,
       title: (workout as { title: string | null }).title,
+      description: (workout as { description: string | null }).description ?? null,
       sourceStartTime: (workout as { source_start_time: string }).source_start_time,
       startTime: (workout as { start_time: string | null }).start_time,
       exercises: ((exercises ?? []) as Array<{
@@ -270,5 +273,34 @@ export async function getHevyWorkoutDetail(
   } catch (err) {
     console.warn('[hevy-history] workoutDetail exception:', err);
     return null;
+  }
+}
+
+/**
+ * Update a workout's editable fields (title + description). Exercises
+ * and sets are left untouched — this only mutates the workout header.
+ * Returns true on success.
+ */
+export async function updateHevyWorkout(
+  userId: string | null,
+  workoutId: string,
+  patch: { title?: string | null; description?: string | null },
+  db: SupabaseClient = supabase,
+): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const { error } = await db
+      .from('hevy_workouts')
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .eq('id', workoutId);
+    if (error) {
+      console.warn('[hevy-history] updateWorkout error:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[hevy-history] updateWorkout exception:', err);
+    return false;
   }
 }

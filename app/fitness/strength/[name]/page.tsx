@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { redirect, notFound } from 'next/navigation';
 import { getCurrentUserIdServer } from '@/lib/auth-server';
+import { createClient } from '@/lib/supabase/server';
 import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
 import ExerciseDetailView from '@/components/fitness/exercise-detail-view';
 
@@ -26,7 +27,8 @@ export default async function ExerciseDetailPage({
   if (!userId) redirect('/login');
   const { name } = await params;
   const decoded = decodeURIComponent(name);
-  const calcs = await computeHevyCalculations(userId);
+  const db = await createClient();
+  const calcs = await computeHevyCalculations(userId, undefined, db);
   const summary = calcs.exercises.find((e) => e.name === decoded);
   if (!summary) notFound();
   return <ExerciseDetailView summary={summary} />;

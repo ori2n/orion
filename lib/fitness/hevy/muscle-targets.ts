@@ -10,6 +10,7 @@
  * pipeline (including the future ORION AI) from silently rewriting it.
  */
 import { supabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 // ─── Row ────────────────────────────────────────────────────────────
 
@@ -46,10 +47,11 @@ function mapRow(row: Row): HevyMuscleTarget {
 /** List all target rows for the user, alphabetical by muscle name. */
 export async function listMuscleTargets(
   userId: string | null,
+  db: SupabaseClient = supabase,
 ): Promise<HevyMuscleTarget[]> {
   if (!userId) return [];
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('hevy_muscle_targets')
       .select('*')
       .eq('user_id', userId)

@@ -197,12 +197,13 @@ export default function ActionsPage() {
   const togglingRef = useRef<Set<string>>(new Set());
 
   const [sectionOrder, setSectionOrder] = useState<string[]>(() => loadSectionOrder());
-  // Habits sections: AT MOST ONE open at a time, default-collapsed. Stored
-  // as the single `openSection` identifier so opening another section
-  // atomically closes the previous one. Newly-arrived sections are
-  // naturally closed because they don't match `openSection` until the
-  // user clicks them — no ref-claim bookkeeping required.
-  const [openSection, setOpenSection] = useState<string | null>(null);
+  // Habits sections: ALL expanded by default. We only track the set of
+  // sections the user has manually collapsed, so every section — including
+  // newly-arrived ones — renders open unless explicitly collapsed. Opening
+  // or closing one section never affects the others.
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const [addingInSection, setAddingInSection] = useState<string | null>(null);
   const [inlineName, setInlineName] = useState('');
@@ -606,17 +607,25 @@ export default function ActionsPage() {
       saveSectionOrder(next);
       return next;
     });
-    // Drop the open-section pointer if it pointed at the deleted section,
-    // so the next render doesn't try to expand a missing entry. Safe to
-    // call even when `openSection` was already something else.
-    setOpenSection((prev) => (prev === section ? null : prev));
+    // Drop the deleted section from the collapsed set so its absence
+    // leaves no stale bookkeeping behind.
+    setCollapsedSections((prev) => {
+      if (!prev.has(section)) return prev;
+      const next = new Set(prev);
+      next.delete(section);
+      return next;
+    });
   }
 
   function toggleSection(section: string) {
-    // Single-active-section semantics: opening a section replaces any
-    // previous open section in one atomic update. Toggling the same
-    // section re-collapses it (openSection becomes null).
-    setOpenSection((prev) => (prev === section ? null : section));
+    // Each section collapses/expands independently. The default state is
+    // expanded, so this only flips the section being toggled.
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
   }
 
   function completedToday(habitId: string): boolean {
@@ -715,7 +724,7 @@ export default function ActionsPage() {
             sectionOrder={sectionOrder}
             habits={habits}
             completions={completions}
-            openSection={openSection}
+            collapsedSections={collapsedSections}
             draggedHabitId={draggedHabitId}
             dragOverSection={dragOverSection}
             draggedSection={draggedSection}
@@ -783,14 +792,15 @@ export default function ActionsPage() {
 // Owns the Habits tab. Renders only the habits card body — error
 // banner, section list, add-section button. The card fills the
 // entire viewport; its inner scroll wrapper keeps the page itself
-// from scrolling. AT MOST ONE section open at a time.
+// from scrolling. All sections are expanded by default and each
+// collapses/expands independently.
 
 function HabitsView(props: {
   error: string | null;
   sectionOrder: string[];
   habits: Habit[];
   completions: Set<string>;
-  openSection: string | null;
+  collapsedSections: Set<string>;
   draggedHabitId: string | null;
   dragOverSection: string | null;
   draggedSection: string | null;
@@ -841,16 +851,16 @@ function HabitsView(props: {
 }) {
   // Habits tab contents. The section list scrolls inside its own
   // `overflow-y-auto` wrapper so the page itself never grows a
-  // scrollbar. AT MOST ONE habit section is open at a time
-  // (openSection); the smooth expand/collapse animation lives
+  // scrollbar. All sections are expanded by default; each collapses/
+  // expands independently. The smooth expand/collapse animation lives
   // inside SectionContainer.
   // is on screen at first paint.
   return (
     // Habits tab owns the entire viewport. The card fills it
     // end-to-end; the inner section list scrolls inside its own
     // `overflow-y-auto` wrapper so the page itself never grows a
-    // scrollbar. AT MOST ONE habit section is open at a time
-    // (openSection); the smooth expand/collapse animation lives
+    // scrollbar. All sections are expanded by default; each collapses/
+    // expands independently. The smooth expand/collapse animation lives
     // inside SectionContainer.
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
               {/* Error banner — sits OUTSIDE the inner scroll wrapper
@@ -871,14 +881,13 @@ function HabitsView(props: {
               {/* Section-based Habits List — single column for compactness
                   in the right rail. min-h-0 flex-1 overflow-y-auto so an
                   expanded section scrolls INSIDE this card without ever
-                  growing the page (the page never scrolls). AT MOST ONE
-                  section is open at any time; opening another closes the
-                  previous one. */}
+                  growing the page (the page never scrolls). Every section
+                  is expanded by default; opening one never closes another. */}
               <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
             {props.sectionOrder.map((sectionName, idx) => {
               const grouped = props.groupHabitsBySection();
               const sectionHabits = grouped.get(sectionName) ?? [];
-              const isCollapsed = props.openSection !== sectionName;
+              const isCollapsed = props.collapsedSections.has(sectionName);
               const isDragOver = props.dragOverSection === sectionName;
               const isSectionDragged = props.draggedSection === sectionName;
               const isDragOverHere = props.dragOverSectionIdx === idx;

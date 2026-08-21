@@ -8,6 +8,7 @@
  * kept strictly separate from the estimated 1RM.
  */
 import { supabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   DEFAULT_EXERCISE_MUSCLES,
   isMuscle,
@@ -47,10 +48,11 @@ function mapMeta(row: MetaRow): HevyExerciseMeta {
 /** List all exercise-meta rows for the user, alphabetical by name. */
 export async function listExerciseMeta(
   userId: string | null,
+  db: SupabaseClient = supabase,
 ): Promise<HevyExerciseMeta[]> {
   if (!userId) return [];
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('hevy_exercise_meta')
       .select('*')
       .eq('user_id', userId)
@@ -73,10 +75,11 @@ export async function listExerciseMeta(
  */
 export async function seedDefaultMuscleMap(
   userId: string | null,
+  db: SupabaseClient = supabase,
 ): Promise<number> {
   if (!userId) return 0;
   try {
-    const { data: exs, error: eErr } = await supabase
+    const { data: exs, error: eErr } = await db
       .from('hevy_workout_exercises')
       .select('name')
       .eq('user_id', userId);
@@ -93,7 +96,7 @@ export async function seedDefaultMuscleMap(
         muscle: DEFAULT_EXERCISE_MUSCLES[n],
       }));
     if (rows.length === 0) return 0;
-    const { error } = await supabase
+    const { error } = await db
       .from('hevy_exercise_meta')
       .upsert(rows, { onConflict: 'user_id,exercise_name', ignoreDuplicates: true });
     if (error) {

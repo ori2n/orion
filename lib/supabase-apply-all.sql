@@ -1237,7 +1237,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   user_id UUID DEFAULT auth.uid() NOT NULL,
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
-  scheduled_for DATE NOT NULL,
+  scheduled_for DATE,
   duration_minutes INTEGER,
   created_at TIMESTAMPTZ DEFAULT now()
 );

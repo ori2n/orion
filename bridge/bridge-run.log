@@ -21,3 +21,155 @@ Waiting for task...
 [17:43:30] [INFO] Freebuff launch started (branch freebuff/task-stop-flow-test-c87f2cea)
 Freebuff: Running                    
 [17:43:38] [INFO] Initial prompt sent.
+[17:47:16] [INFO] Stop command detected for task c87f2cea
+[17:47:16] [INFO] Stopping task c87f2cea
+[17:47:16] [INFO] Sending Ctrl+C
+[17:47:16] [INFO] Waiting for Freebuff to exit
+[17:47:26] [WARN] Force-killing Freebuff process tree
+[17:47:26] [INFO] Process terminated
+[17:47:27] [INFO] Process confirmed gone
+[17:47:28] [INFO] Freebuff exited
+[17:47:28] [INFO] Task marked stopped
+[17:47:28] [INFO] Task finished → stopped (4ded11dc)
+Freebuff: Idle                    
+[17:47:28] [INFO] Command "stop" completed for task c87f2cea.
+[17:47:28] [INFO] task query executed → 0 queued task(s) found
+[17:47:35] [ERROR] terminal output insert failed: TypeError: fetch failed
+[17:47:59] [INFO] task query executed → 0 queued task(s) found
+[17:48:20] [INFO] Deleted branch freebuff/task-stop-flow-test-c87f2cea.
+[17:48:20] [INFO] Command "discard" completed for task c87f2cea.
+[17:48:27] [INFO] Command "discard" completed for task 10ce4353.
+[17:48:30] [INFO] task query executed → 0 queued task(s) found
+[17:49:00] [INFO] task query executed → 0 queued task(s) found
+[17:49:31] [INFO] task query executed → 0 queued task(s) found
+[17:50:02] [INFO] task query executed → 0 queued task(s) found
+[17:50:33] [INFO] task query executed → 0 queued task(s) found
+[17:50:57] [INFO] task query executed → 1 queued task(s) found
+[17:50:57] [INFO] Task detected: "test 1" (ff166092)
+[17:50:58] [INFO] Task claimed → status "starting" (session 2263ef9c)
+[17:50:58] [INFO] Starting task "test 1" (ff166092)
+[17:50:58] [INFO] On branch freebuff/task-test-1-ff166092
+[17:50:58] [INFO] Freebuff launch started (branch freebuff/task-test-1-ff166092)
+Freebuff: Running                    
+[17:51:06] [INFO] Initial prompt sent.
+[17:51:59] [INFO] Stop command detected for task ff166092
+[17:51:59] [INFO] Stopping task ff166092
+[17:51:59] [INFO] Sending Ctrl+C
+[17:51:59] [INFO] Waiting for Freebuff to exit
+[17:52:09] [WARN] Force-killing Freebuff process tree
+[17:52:10] [INFO] Process terminated
+[17:52:10] [INFO] Process confirmed gone
+[17:52:11] [INFO] Task finished → stopped (4ded11dc)
+Freebuff: Idle                    
+[17:52:11] [INFO] Freebuff exited
+[17:52:11] [INFO] Task marked stopped
+[17:52:11] [INFO] Command "stop" completed for task ff166092.
+[17:52:12] [INFO] task query executed → 0 queued task(s) found
+[17:52:43] [INFO] task query executed → 0 queued task(s) found
+[17:53:14] [INFO] task query executed → 0 queued task(s) found
+[17:53:45] [INFO] task query executed → 0 queued task(s) found
+[17:54:15] [INFO] task query executed → 0 queued task(s) found
+[17:54:46] [INFO] task query executed → 0 queued task(s) found
+[17:55:17] [INFO] task query executed → 0 queued task(s) found
+[17:55:48] [INFO] task query executed → 0 queued task(s) found
+[17:56:19] [INFO] task query executed → 0 queued task(s) found
+[17:56:50] [INFO] task query executed → 0 queued task(s) found
+[17:57:20] [INFO] task query executed → 0 queued task(s) found
+[17:57:51] [INFO] task query executed → 0 queued task(s) found
+[17:58:22] [INFO] task query executed → 0 queued task(s) found
+[17:58:52] [INFO] task query executed → 0 queued task(s) found
+[17:59:23] [INFO] task query executed → 0 queued task(s) found
+[17:59:54] [INFO] task query executed → 0 queued task(s) found
+[18:00:24] [INFO] task query executed → 0 queued task(s) found
+[18:00:55] [INFO] task query executed → 0 queued task(s) found
+[18:01:26] [INFO] task query executed → 0 queued task(s) found
+[18:01:57] [INFO] task query executed → 0 queued task(s) found
+[18:02:27] [INFO] task query executed → 0 queued task(s) found
+[18:02:58] [INFO] task query executed → 0 queued task(s) found
+[18:03:29] [INFO] task query executed → 0 queued task(s) found
+[18:03:59] [INFO] task query executed → 0 queued task(s) found
+[18:04:30] [INFO] task query executed → 0 queued task(s) found
+[18:05:01] [INFO] task query executed → 0 queued task(s) found
+[18:05:32] [INFO] task query executed → 0 queued task(s) found
+[18:06:02] [INFO] task query executed → 0 queued task(s) found
+[18:06:33] [INFO] task query executed → 0 queued task(s) found
+[18:07:04] [INFO] task query executed → 0 queued task(s) found
+[18:07:35] [INFO] task query executed → 0 queued task(s) found
+[18:08:05] [INFO] task query executed → 0 queued task(s) found
+[18:08:36] [INFO] task query executed → 0 queued task(s) found
+[18:09:07] [INFO] task query executed → 0 queued task(s) found
+[18:09:38] [INFO] task query executed → 0 queued task(s) found
+[18:10:08] [INFO] task query executed → 0 queued task(s) found
+[18:10:39] [INFO] task query executed → 0 queued task(s) found
+[18:11:10] [INFO] task query executed → 0 queued task(s) found
+[18:11:41] [INFO] task query executed → 0 queued task(s) found
+[18:12:11] [INFO] task query executed → 0 queued task(s) found
+[18:12:42] [INFO] task query executed → 0 queued task(s) found
+[18:13:13] [INFO] task query executed → 0 queued task(s) found
+[18:13:44] [INFO] task query executed → 0 queued task(s) found
+[18:14:15] [INFO] task query executed → 0 queued task(s) found
+[18:14:45] [INFO] task query executed → 0 queued task(s) found
+[18:15:16] [INFO] task query executed → 0 queued task(s) found
+[18:15:47] [INFO] task query executed → 0 queued task(s) found
+[18:16:18] [INFO] task query executed → 0 queued task(s) found
+[18:16:48] [INFO] task query executed → 0 queued task(s) found
+[18:17:19] [INFO] task query executed → 0 queued task(s) found
+[18:17:50] [INFO] task query executed → 0 queued task(s) found
+[18:18:21] [INFO] task query executed → 0 queued task(s) found
+[18:18:52] [INFO] task query executed → 0 queued task(s) found
+[18:19:23] [INFO] task query executed → 0 queued task(s) found
+[18:19:54] [INFO] task query executed → 0 queued task(s) found
+[18:20:24] [INFO] task query executed → 0 queued task(s) found
+[18:20:55] [INFO] task query executed → 0 queued task(s) found
+[18:21:26] [INFO] task query executed → 0 queued task(s) found
+[18:21:57] [INFO] task query executed → 0 queued task(s) found
+[18:22:28] [INFO] task query executed → 0 queued task(s) found
+[18:22:59] [INFO] task query executed → 0 queued task(s) found
+[18:23:30] [INFO] task query executed → 0 queued task(s) found
+[18:24:00] [INFO] task query executed → 0 queued task(s) found
+[18:24:31] [INFO] task query executed → 0 queued task(s) found
+[18:25:02] [INFO] task query executed → 0 queued task(s) found
+[18:25:33] [INFO] task query executed → 0 queued task(s) found
+[18:26:04] [INFO] task query executed → 0 queued task(s) found
+[18:26:35] [INFO] task query executed → 0 queued task(s) found
+[18:27:06] [INFO] task query executed → 0 queued task(s) found
+[18:27:36] [INFO] task query executed → 0 queued task(s) found
+[18:28:07] [INFO] task query executed → 0 queued task(s) found
+[18:28:38] [INFO] task query executed → 0 queued task(s) found
+[18:29:09] [INFO] task query executed → 0 queued task(s) found
+[18:29:40] [INFO] task query executed → 0 queued task(s) found
+[18:30:10] [INFO] task query executed → 0 queued task(s) found
+[18:30:41] [INFO] task query executed → 0 queued task(s) found
+[18:31:12] [INFO] task query executed → 0 queued task(s) found
+[18:31:43] [INFO] task query executed → 0 queued task(s) found
+[18:32:14] [INFO] task query executed → 0 queued task(s) found
+[18:32:45] [INFO] task query executed → 0 queued task(s) found
+[18:33:16] [INFO] task query executed → 0 queued task(s) found
+[18:33:46] [INFO] task query executed → 0 queued task(s) found
+[18:34:17] [INFO] task query executed → 0 queued task(s) found
+[18:34:48] [INFO] task query executed → 0 queued task(s) found
+[18:35:19] [INFO] task query executed → 0 queued task(s) found
+[18:35:49] [INFO] task query executed → 0 queued task(s) found
+[18:36:20] [INFO] task query executed → 0 queued task(s) found
+[18:36:51] [INFO] task query executed → 0 queued task(s) found
+[18:37:22] [INFO] task query executed → 0 queued task(s) found
+[18:37:53] [INFO] task query executed → 0 queued task(s) found
+[18:38:24] [INFO] task query executed → 0 queued task(s) found
+[18:38:54] [INFO] task query executed → 0 queued task(s) found
+[18:39:25] [INFO] task query executed → 0 queued task(s) found
+[18:39:56] [INFO] task query executed → 0 queued task(s) found
+[18:40:27] [INFO] task query executed → 0 queued task(s) found
+[18:40:56] [INFO] Deleted branch freebuff/task-test-1-ff166092.
+[18:40:56] [INFO] Command "discard" completed for task ff166092.
+[18:40:57] [INFO] task query executed → 0 queued task(s) found
+[18:41:28] [INFO] task query executed → 0 queued task(s) found
+[18:41:40] [INFO] task query executed → 1 queued task(s) found
+[18:41:40] [INFO] Task detected: "title change" (97a6cca0)
+[18:41:40] [INFO] Task claimed → status "starting" (session ec97edb4)
+[18:41:40] [INFO] Starting task "title change" (97a6cca0)
+[18:41:41] [INFO] On branch freebuff/task-title-change-97a6cca0
+[18:41:41] [INFO] Freebuff launch started (branch freebuff/task-title-change-97a6cca0)
+Freebuff: Running                    
+[18:41:49] [INFO] Initial prompt sent.
+[20:33:24] [ERROR] terminal output insert failed: TypeError: fetch failed
+[20:33:24] [ERROR] terminal output insert failed: TypeError: fetch failed

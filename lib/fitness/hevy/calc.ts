@@ -84,6 +84,7 @@ export interface WeeklyBucket {
 export interface MuscleWeeklyPoint {
   week: string;
   sets: number;
+  /** Distinct training days in this week (one per date the muscle was hit). */
   sessions: number;
   volumeKg: number;
 }
@@ -106,14 +107,14 @@ export interface MuscleSummary {
   totalVolumeKg: number;
   /** Sets per week across weeks the muscle was actually trained. */
   avgSetsPerWeek: number | null;
-  /** Training frequency: sessions per week across active weeks. */
+  /** Training frequency: distinct training days per week across active weeks. */
   sessionsPerWeek: number | null;
   /**
-   * Distinct session count inside the last 4 calendar weeks — the
+   * Distinct training-day count inside the last 4 calendar weeks — the
    * denominator for the on-target comparison.
    */
   sessionsLast4Weeks: number;
-  /** Weekly session average for the last 4 calendar weeks. */
+  /** Weekly training-day average for the last 4 calendar weeks. */
   actualSessionsPerWeekLast4: number | null;
   /** Average weekly sets over the last 4 calendar weeks (zero-filled). */
   last4WeekSetsAvg: number | null;

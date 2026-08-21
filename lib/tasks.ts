@@ -16,8 +16,9 @@ export interface Task {
   id: string;
   title: string;
   status: 'pending' | 'completed';
-  scheduled_for: string; // YYYY-MM-DD
+  scheduled_for: string | null; // YYYY-MM-DD, or null when undated
   duration_minutes?: number | null;
+  notes?: string | null;
   created_at: string;
 }
 
@@ -99,15 +100,19 @@ export async function getTasks(): Promise<Task[]> {
 // ─── Create ─────────────────────────────────────────────────────────
 
 export async function insertTask(
-  task: Pick<Task, 'title' | 'scheduled_for'> & { duration_minutes?: number | null },
+  task: Pick<Task, 'title' | 'scheduled_for'> & {
+    duration_minutes?: number | null;
+    notes?: string | null;
+  },
 ): Promise<InsertResult<Task>> {
   const userId = await getCurrentUserId();
   if (!userId) return { data: null, error: null };
   return insertAndSelect<Task>(
     supabase.from('tasks').insert({
       title: task.title,
-      scheduled_for: task.scheduled_for,
+      scheduled_for: task.scheduled_for || null,
       duration_minutes: task.duration_minutes ?? null,
+      notes: task.notes ?? null,
       user_id: userId,
     }),
     'insertTask',
@@ -140,6 +145,39 @@ export async function toggleTaskStatus(id: string): Promise<boolean> {
 
   if (error) {
     console.warn('[tasks] toggleTaskStatus update error:', error.message);
+    return false;
+  }
+  return true;
+}
+
+/** Fields a task can be edited with. */
+export interface UpdateTaskInput {
+  title?: string;
+  scheduled_for?: string | null;
+  duration_minutes?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * Update one or more editable fields on a task. `notes` is only
+ * touched when explicitly provided, so toggling status or moving a
+ * task elsewhere never clobbers existing notes.
+ */
+export async function updateTask(
+  id: string,
+  patch: UpdateTaskInput,
+): Promise<boolean> {
+  const userId = await getCurrentUserId();
+  if (!userId) return false;
+
+  const { error } = await supabase
+    .from('tasks')
+    .update(patch)
+    .eq('id', id)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.warn('[tasks] updateTask error:', error.message);
     return false;
   }
   return true;

@@ -41,7 +41,7 @@ export async function updateSession(request: NextRequest) {
 
   // ── Protected routes ───────────────────────────────────────────
   // Redirect unauthenticated users to /login
-  const protectedPaths = ['/actions', '/freebuff'];
+  const protectedPaths = ['/time-management', '/freebuff'];
   const isProtected = protectedPaths.some(
     (p) => pathname === p || pathname.startsWith(`${p}/`),
   );
