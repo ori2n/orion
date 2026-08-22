@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getTasks,
   insertTask,
@@ -75,6 +75,8 @@ export default function TodoList() {
   const [duration, setDuration] = useState(30);
   const [notes, setNotes] = useState('');
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const addFormRef = useRef<HTMLDivElement>(null);
 
   // Load tasks from Supabase on mount
   const loadTasks = useCallback(async () => {
@@ -88,6 +90,28 @@ export default function TodoList() {
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
+
+  // Close add form when clicking outside
+  useEffect(() => {
+    if (!showAddForm) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (addFormRef.current && !addFormRef.current.contains(e.target as Node)) {
+        setShowAddForm(false);
+        setTitle('');
+        setDuration(30);
+        setNotes('');
+        setNoDate(false);
+      }
+    }
+    // Delay adding listener so the same click that opens doesn't close
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleClickOutside);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showAddForm]);
 
   async function addTask() {
     if (!title.trim()) return;
@@ -112,6 +136,7 @@ export default function TodoList() {
     setDuration(30);
     setNotes('');
     setNoDate(false);
+    setShowAddForm(false);
   }
 
   async function toggleTask(id: string) {
@@ -254,91 +279,116 @@ export default function TodoList() {
         </div>
       )}
 
-      {/* New Task Form */}
-      <section className="mb-8 rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="mb-5 text-sm font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-          New Task
-        </h2>
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-3">
-          <div className="flex-1">
-            <label htmlFor="task-title" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              Title
-            </label>
-            <input
-              id="task-title"
-              type="text"
-              placeholder="e.g. Review design mockups"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addTask()}
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </div>
-          <div className="w-full sm:w-40">
-            <label htmlFor="task-date" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              Scheduled for
-            </label>
-            <input
-              id="task-date"
-              type="date"
-              value={scheduledFor}
-              disabled={noDate}
-              onChange={(e) => setScheduledFor(e.target.value)}
-              className={`w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700 ${
-                noDate ? 'cursor-not-allowed opacity-50' : ''
-              }`}
-            />
-            <label className="mt-1.5 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-              <input
-                type="checkbox"
-                checked={noDate}
-                onChange={(e) => setNoDate(e.target.checked)}
-                className="h-3.5 w-3.5 accent-zinc-900 dark:accent-zinc-100"
-              />
-              No date
-            </label>
-          </div>
-          <div className="w-full sm:w-28">
-            <label htmlFor="task-duration" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              Minutes
-            </label>
-            <input
-              id="task-duration"
-              type="number"
-              min={1}
-              max={480}
-              value={duration}
-              onChange={(e) => setDuration(Math.max(1, parseInt(e.target.value) || 1))}
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </div>
+      {/* Add Task — compact button / expanded form */}
+      <section className="mb-8">
+        {!showAddForm ? (
           <button
-            onClick={addTask}
-            disabled={!title.trim()}
-            className="flex h-10 items-center gap-1.5 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            onClick={() => setShowAddForm(true)}
+            className="flex w-full items-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-400 shadow-sm transition-colors hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-300"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
             </svg>
-            Add
+            Add task
           </button>
+        ) : (
+          <div
+            ref={addFormRef}
+            className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-3">
+                <div className="flex-1">
+                  <label htmlFor="task-title" className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Title
+                  </label>
+                  <input
+                    id="task-title"
+                    type="text"
+                    placeholder="e.g. Review design mockups"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && addTask()}
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
+                    autoFocus
+                  />
+                </div>
+                <div className="w-full sm:w-36">
+                  <label htmlFor="task-date" className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Scheduled for
+                  </label>
+                  <input
+                    id="task-date"
+                    type="date"
+                    value={scheduledFor}
+                    disabled={noDate}
+                    onChange={(e) => setScheduledFor(e.target.value)}
+                    className={`w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700 ${
+                      noDate ? 'cursor-not-allowed opacity-50' : ''
+                    }`}
+                  />
+                  <label className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={noDate}
+                      onChange={(e) => setNoDate(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-zinc-900 dark:accent-zinc-100"
+                    />
+                    No date
+                  </label>
+                </div>
+                <div className="w-full sm:w-24">
+                  <label htmlFor="task-duration" className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Minutes
+                  </label>
+                  <input
+                    id="task-duration"
+                    type="number"
+                    min={1}
+                    max={480}
+                    value={duration}
+                    onChange={(e) => setDuration(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-2 text-sm text-zinc-900 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={addTask}
+                    disabled={!title.trim()}
+                    className="flex h-9 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setTitle('');
+                      setDuration(30);
+                      setNotes('');
+                      setNoDate(false);
+                    }}
+                    className="flex h-9 items-center rounded-lg px-3 text-sm text-zinc-500 transition-colors hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label htmlFor="task-notes" className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  Notes (optional)
+                </label>
+                <textarea
+                  id="task-notes"
+                  rows={2}
+                  placeholder="Add details, context, or sub-steps…"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
+                />
+              </div>
+            </div>
           </div>
-
-          <div>
-            <label htmlFor="task-notes" className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              Notes (optional)
-            </label>
-            <textarea
-              id="task-notes"
-              rows={2}
-              placeholder="Add details, context, or sub-steps…"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 transition-colors focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </div>
-        </div>
+        )}
       </section>
 
       {/* Section-grouped rows — all four categories always visible, even when empty. */}

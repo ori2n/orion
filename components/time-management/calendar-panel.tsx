@@ -89,6 +89,11 @@ interface CalendarPanelProps {
    * for the sidebar. Habits remain habits; this never creates events.
    */
   habitCompletions?: Set<string>;
+  /**
+   * Called after a sidebar drag-drop successfully creates a calendar
+   * event. The parent uses it to bump its own refresh triggers.
+   */
+  onSidebarSchedule?: () => void;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -543,6 +548,7 @@ export default function CalendarPanel({
   refreshKey,
   habits = [],
   habitCompletions = new Set<string>(),
+  onSidebarSchedule,
 }: CalendarPanelProps = {}) {
   // Internal fallback: when the parent doesn't pass events/onMutate, we
   // manage them ourselves. This keeps the component drop-in for callers
@@ -714,8 +720,52 @@ export default function CalendarPanel({
     });
   }, [nlDraft, anchorDate]);
 
+  // Handle drag-drop from sidebar onto the calendar timeline.
+  // Creates a calendar event for a habit or task at the dropped time slot.
+  const handleSidebarDrop = useCallback(
+    async (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => {
+      const uid = await getCurrentUserId();
+      if (!uid) return;
+      const startISO = `${dateStr}T${timeStr}:00`;
+      let title = '';
+      let durationMin = 30;
+
+      if (itemType === 'habit') {
+        const habit = habits.find((h) => h.id === itemId);
+        if (!habit) return;
+        title = habit.name;
+        durationMin = habit.duration_minutes ?? 30;
+      } else {
+        const task = tasks.find((t) => t.id === itemId);
+        if (!task) return;
+        title = task.title;
+        durationMin = task.duration_minutes ?? 30;
+      }
+
+      const start = new Date(startISO);
+      const end = new Date(start.getTime() + durationMin * 60_000);
+      const payload = {
+        user_id: uid,
+        title,
+        start_at: start.toISOString(),
+        end_at: end.toISOString(),
+        color: null as string | null,
+        location: null as string | null,
+        notes: null as string | null,
+        all_day: false,
+        recurrence: 'manual',
+      };
+      const { error } = await supabase.from('calendar_events').insert(payload);
+      if (!error) {
+        await onMutate();
+        onSidebarSchedule?.();
+      }
+    },
+    [habits, tasks, onMutate, onSidebarSchedule],
+  );
+
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 md:flex-row">
+    <div className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 md:h-full md:overflow-hidden md:flex-row">
       {/* Left sidebar — compact mini month + Today/Upcoming list. On
           mobile it stacks above the day view; on md+ it's a fixed column. */}
       <aside className="flex w-full shrink-0 flex-col border-b border-zinc-200 dark:border-zinc-800 md:w-64 md:border-b-0 md:border-r">
@@ -728,7 +778,7 @@ export default function CalendarPanel({
             }}
           />
         </div>
-        <div className="max-h-44 min-h-0 overflow-y-auto md:max-h-none md:flex-1">
+        <div className="min-h-0 overflow-y-auto md:flex-1">
           <TodayUpcoming
             events={events}
             habits={habits}
@@ -738,6 +788,7 @@ export default function CalendarPanel({
               setAnchorDate(startOfDay(d));
               setView('day');
             }}
+            onSidebarDrop={handleSidebarDrop}
           />
         </div>
       </aside>
@@ -757,7 +808,7 @@ export default function CalendarPanel({
           nlError={nlError}
         />
 
-        <div className="flex-1 min-h-0 overflow-hidden">
+        <div className="flex-1 md:min-h-0 md:overflow-hidden">
           {view === 'day' && (
             <DayView
               anchorDate={anchorDate}
@@ -780,6 +831,7 @@ export default function CalendarPanel({
                 await onMutate();
               }}
               onClickEvent={(e) => setEditing(e)}
+              onSidebarDrop={handleSidebarDrop}
             />
           )}
 
@@ -984,19 +1036,20 @@ function fmtRelativeDay(dateStr: string): string {
 }
 
 function TodayUpcoming({
-  events, habits, completions, tasks, onSelectDate,
+  events, habits, completions, tasks, onSelectDate, onSidebarDrop,
 }: {
   events: CalendarEvent[];
   habits: HabitSummary[];
   completions: Set<string>;
   tasks: Task[];
   onSelectDate: (d: Date) => void;
+  onSidebarDrop?: (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => void;
 }) {
   const now = new Date();
   const todayKey = ymd(now);
 
   // Incomplete habits = not yet completed today.
-  const incompleteHabits = habits.filter((h) => !completions.has(h.id)).slice(0, 6);
+  const incompleteHabits = habits.filter((h) => !completions.has(h.id));
   const todayTodos = tasks
     .filter((t) => t.status === 'pending' && t.scheduled_for === todayKey)
     .slice(0, 6);
@@ -1018,6 +1071,12 @@ function TodayUpcoming({
     .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
     .slice(0, 6);
 
+  // Unscheduled items: habits (all incomplete) + tasks with no date
+  const unscheduledTasks = tasks
+    .filter((t) => t.status === 'pending' && !t.scheduled_for)
+    .slice(0, 6);
+  const hasUnscheduled = incompleteHabits.length > 0 || unscheduledTasks.length > 0;
+
   return (
     <div className="space-y-3 px-3 py-3">
       <section>
@@ -1029,7 +1088,7 @@ function TodayUpcoming({
             <li className="text-[11px] italic text-zinc-400 dark:text-zinc-600">Nothing left today</li>
           ) : (
             <>
-              {incompleteHabits.map((h) => (
+              {incompleteHabits.slice(0, 6).map((h) => (
                 <li key={`h-${h.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
                   <span aria-hidden className="h-3 w-3 shrink-0 rounded-full border-2 border-zinc-300 dark:border-zinc-600" />
                   <span className="truncate">{h.name}</span>
@@ -1103,6 +1162,63 @@ function TodayUpcoming({
           )}
         </ul>
       </section>
+
+      {/* Unscheduled — draggable habits + tasks for the calendar */}
+      {hasUnscheduled && (
+        <section>
+          <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+            Unscheduled — drag to calendar
+          </h4>
+          <ul className="space-y-0.5">
+            {incompleteHabits.map((h) => (
+              <li
+                key={`uh-${h.id}`}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('application/x-sidebar-item', JSON.stringify({ type: 'habit', id: h.id }));
+                  e.dataTransfer.effectAllowed = 'copy';
+                }}
+                className="flex cursor-grab items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 active:cursor-grabbing dark:text-zinc-300 dark:hover:bg-zinc-800"
+                title={`Drag ${h.name} onto the calendar to schedule it`}
+              >
+                <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dark:bg-emerald-500" />
+                <span className="truncate font-medium">{h.name}</span>
+                {h.duration_minutes != null && (
+                  <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                    {h.duration_minutes}m
+                  </span>
+                )}
+                <svg className="h-2.5 w-2.5 shrink-0 text-zinc-300 dark:text-zinc-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                </svg>
+              </li>
+            ))}
+            {unscheduledTasks.map((t) => (
+              <li
+                key={`ut-${t.id}`}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('application/x-sidebar-item', JSON.stringify({ type: 'task', id: t.id }));
+                  e.dataTransfer.effectAllowed = 'copy';
+                }}
+                className="flex cursor-grab items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 active:cursor-grabbing dark:text-zinc-300 dark:hover:bg-zinc-800"
+                title={`Drag ${t.title} onto the calendar to schedule it`}
+              >
+                <span aria-hidden className="h-2 w-2 shrink-0 rounded bg-sky-400 dark:bg-sky-500" />
+                <span className="truncate font-medium">{t.title}</span>
+                {t.duration_minutes != null && (
+                  <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
+                    {t.duration_minutes}m
+                  </span>
+                )}
+                <svg className="h-2.5 w-2.5 shrink-0 text-zinc-300 dark:text-zinc-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                </svg>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
@@ -1227,6 +1343,7 @@ function DayView({
   onCreateRange,
   onUpdateEvent,
   onClickEvent,
+  onSidebarDrop,
 }: {
   anchorDate: Date;
   allDayEvents: ExpandedEvent[];
@@ -1234,6 +1351,7 @@ function DayView({
   onCreateRange: (startISO: string, endISO: string) => void;
   onUpdateEvent: (id: string, iso: { start_at: string; end_at: string }) => Promise<void>;
   onClickEvent: (e: ExpandedEvent) => void;
+  onSidebarDrop?: (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -1245,6 +1363,8 @@ function DayView({
   }>({ type: null, originY: 0, startMin: 0, endMin: 0 });
   const [draftRange, setDraftRange] = useState<null | { top: number; height: number }>(null);
   const [dragPreview, setDragPreview] = useState<null | { id: string; top: number; height: number }>(null);
+  const [sidebarDragOver, setSidebarDragOver] = useState(false);
+  const [sidebarDropMin, setSidebarDropMin] = useState<number | null>(null);
 
   const now = useNow();
   const isToday = sameDay(now, anchorDate);
@@ -1394,6 +1514,52 @@ function DayView({
     [anchorDate, onCreateRange, onUpdateEvent],
   );
 
+  // ─── Sidebar drag-and-drop handlers ───────────────────────────────────
+  const onSidebarDragOver = useCallback((e: React.DragEvent) => {
+    // Only accept sidebar item drags
+    const types = Array.from(e.dataTransfer.types);
+    if (!types.includes('application/x-sidebar-item')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setSidebarDragOver(true);
+
+    // Calculate which minute slot the cursor is over
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const y = e.clientY - rect.top + containerRef.current.scrollTop;
+      const min = clampMinutes(snapMinutes(y / PX_PER_MIN));
+      setSidebarDropMin(min);
+    }
+  }, []);
+
+  const onSidebarDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear if leaving the container (not entering a child)
+    const related = e.relatedTarget as HTMLElement | null;
+    if (containerRef.current && related && containerRef.current.contains(related)) return;
+    setSidebarDragOver(false);
+    setSidebarDropMin(null);
+  }, []);
+
+  const onSidebarDropHandler = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setSidebarDragOver(false);
+    setSidebarDropMin(null);
+
+    const raw = e.dataTransfer.getData('application/x-sidebar-item');
+    if (!raw || !onSidebarDrop || !containerRef.current) return;
+
+    try {
+      const { type, id } = JSON.parse(raw) as { type: 'habit' | 'task'; id: string };
+      const rect = containerRef.current.getBoundingClientRect();
+      const y = e.clientY - rect.top + containerRef.current.scrollTop;
+      const min = clampMinutes(snapMinutes(y / PX_PER_MIN));
+      const hm = minutesToHM(min);
+      const dateStr = ymd(anchorDate);
+      const timeStr = `${pad2(hm.h)}:${pad2(hm.m)}`;
+      onSidebarDrop(type, id, dateStr, timeStr);
+    } catch { /* invalid payload */ }
+  }, [anchorDate, onSidebarDrop]);
+
   // Expand recurring events into virtual occurrences for THIS day.
   // Non-recurring events pass through unchanged. Recurring events get
   // virtual rows that render exactly like real ones in the day view.
@@ -1469,7 +1635,13 @@ function DayView({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUpGrid}
         onPointerCancel={onPointerUpGrid}
-        className="relative flex-1 cursor-crosshair select-none overflow-y-auto overscroll-contain"
+        onDragOver={onSidebarDragOver}
+        onDragLeave={onSidebarDragLeave}
+        onDrop={onSidebarDropHandler}
+        className={`relative flex-1 select-none overscroll-contain ${
+          sidebarDragOver ? 'cursor-copy' : 'cursor-crosshair'
+        } overflow-y-visible md:overflow-y-auto`
+        }
         // touch-action=pan-y lets mobile users scroll the timeline
         // vertically with their thumb while still letting pointer events
         // drive our drag-to-create + drag-to-move/resize handlers.
@@ -1543,6 +1715,19 @@ function DayView({
               style={{ top: draftRange.top, height: draftRange.height }}
             >
               <span className="opacity-80">New commitment</span>
+            </div>
+          )}
+
+          {/* Sidebar drag-drop indicator */}
+          {sidebarDragOver && sidebarDropMin != null && (
+            <div
+              className="pointer-events-none absolute left-12 right-2 rounded-md border-2 border-dashed border-emerald-400 bg-emerald-100/50 px-2 py-1 text-[11px] font-medium text-emerald-700 dark:border-emerald-500 dark:bg-emerald-900/30 dark:text-emerald-200"
+              style={{
+                top: sidebarDropMin * PX_PER_MIN,
+                height: 30 * PX_PER_MIN,
+              }}
+            >
+              <span className="opacity-80">Drop to schedule</span>
             </div>
           )}
 

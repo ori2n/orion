@@ -647,7 +647,7 @@ export default function ActionsPage() {
     // outer container is `overflow-hidden` and each child panel
     // (calendar, habits card, todos card) manages its own internal
     // scroll when its content exceeds its share of the viewport.
-    <div className="flex h-full w-full flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+    <div className="flex h-full w-full flex-col bg-zinc-50 dark:bg-zinc-950 md:overflow-hidden">
       {/* ── Inline page header (not sticky) ───────────────────── */}
       <header className="flex shrink-0 items-center justify-between gap-3 px-3 pt-2 pb-1.5 sm:px-4">
         <div className="flex items-center gap-2 min-w-0">
@@ -702,18 +702,19 @@ export default function ActionsPage() {
       </header>
 
       {/* ── View content ───────────────────────────────────────── */}
-      <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col overflow-hidden px-2 pb-2 sm:px-3">
+      <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col px-2 pb-2 sm:px-3 md:overflow-hidden">
         {view === 'calendar' && (
           // Calendar tab owns the entire viewport. The CalendarPanel
           // fetches its own data and manages its own internal scroll
           // for the day timeline / week grid / month grid. The wrapper
           // here just sets `min-h-0` so the panel rides the parent
           // flex chain without triggering a page scrollbar.
-          <div className="h-full min-h-0 min-w-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-1 md:h-full">
             <CalendarPanel
               refreshKey={calendarRefreshKey}
               habits={habits}
               habitCompletions={completions}
+              onSidebarSchedule={() => setCalendarRefreshKey((k) => k + 1)}
             />
           </div>
         )}

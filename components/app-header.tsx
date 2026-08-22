@@ -28,6 +28,7 @@ const NAV: Array<{ href: string; label: string }> = [
   { href: '/', label: 'Home' },
   { href: '/time-management', label: 'Time Management' },
   { href: '/fitness', label: 'Fitness' },
+  { href: '/finance', label: 'Finance' },
 ];
 
 function currentSection(pathname: string): { href: string; label: string } | null {
