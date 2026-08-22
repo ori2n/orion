@@ -44,7 +44,7 @@ export default async function FitnessLayout({
   }
   return (
     <div
-      className="relative flex h-full w-full flex-col"
+      className="relative flex min-h-full w-full flex-col"
       style={{
         background: `
           radial-gradient(ellipse 80% 60% at 50% 0%, rgba(244,114,182,0.05) 0%, transparent 60%),
@@ -66,7 +66,10 @@ export default async function FitnessLayout({
       />
       <FitnessChromeTop />
       <FitnessSubnav />
-      <main className="relative z-10 flex flex-1 flex-col overflow-y-auto">
+      {/* No overflow here — the page scrolls with the body so vertical
+          swipes work naturally from anywhere in the content area. The
+          sticky sub-nav above stays pinned below the app header. */}
+      <main className="relative z-10 flex flex-1 flex-col">
         {children}
       </main>
       <Footer />

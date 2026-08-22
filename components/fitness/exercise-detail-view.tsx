@@ -1,20 +1,26 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  YAxis,
-  XAxis,
-  Tooltip,
-  CartesianGrid,
-} from 'recharts';
 import { supabase } from '@/lib/supabase';
 import { getCurrentUserId } from '@/lib/auth';
 import type { ExerciseSummary } from '@/lib/fitness/hevy/calculations';
 import { fmtKg, fmtLongDate, fmtRelativeDate } from '@/lib/fitness/format';
+
+// `recharts` is ~300 KB — load it lazily so the page header and stats
+// paint before the chart downloads.
+const ExerciseProgressionChart = dynamic(
+  () => import('@/components/fitness/charts/exercise-progression-chart'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
+        Loading chart…
+      </div>
+    ),
+  },
+);
 
 /**
  * ExerciseDetailView — full drill-down for a single exercise.
@@ -55,15 +61,17 @@ export default function ExerciseDetailView({
         setLoading(false);
         return;
       }
+      // Filter the exercise name SERVER-side — the previous version
+      // downloaded every exercise row for the user and filtered in JS.
       const { data: exRows } = await supabase
         .from('hevy_workout_exercises')
-        .select('id, workout_id, name')
-        .eq('user_id', userId);
+        .select('id, workout_id')
+        .eq('user_id', userId)
+        .eq('name', summary.name);
       const matching = ((exRows ?? []) as Array<{
         id: string;
         workout_id: string;
-        name: string;
-      }>).filter((e) => e.name === summary.name);
+      }>);
       const ids = matching.map((e) => e.id);
       let sets: Array<{ weightKg: number | null; reps: number | null; workout_exercise_id: string }> = [];
       if (ids.length > 0) {
@@ -239,47 +247,7 @@ export default function ExerciseDetailView({
           </div>
         ) : (
           <div className="h-56 sm:h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={series} margin={{ top: 8, right: 6, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(63,63,70,0.4)" strokeDasharray="2 4" />
-                <XAxis
-                  dataKey="dateLabel"
-                  tickFormatter={(d) => new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  minTickGap={20}
-                />
-                <YAxis
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={28}
-                />
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                  labelFormatter={(l) => fmtLongDate(l as string)}
-                  formatter={(v, n) => [
-                    fmtKg(typeof v === 'number' ? v : Number(v), true),
-                    n === 'heaviest' ? 'PR (kg)' : 'Est 1RM (kg)',
-                  ]}
-                />
-                <Line
-                  dataKey="est1rm"
-                  stroke="#f43f5e"
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-                <Line
-                  dataKey="heaviest"
-                  stroke="#e4e4e7"
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <ExerciseProgressionChart series={series} />
           </div>
         )}
       </section>
@@ -374,10 +342,4 @@ function Stat({
   );
 }
 
-const tooltipStyle: React.CSSProperties = {
-  background: '#18181b',
-  border: '1px solid #3f3f46',
-  borderRadius: 8,
-  color: '#e4e4e7',
-  fontSize: 11,
-};
+

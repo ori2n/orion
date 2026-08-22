@@ -1,24 +1,28 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  ReferenceLine,
-  Cell,
-} from 'recharts';
 import { getCurrentUserId } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import type { MuscleSummary } from '@/lib/fitness/hevy/calc';
+import type { ExerciseSummary, MuscleSummary } from '@/lib/fitness/hevy/calc';
 import { upsertMuscleTarget } from '@/lib/fitness/hevy/muscle-targets';
 import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
 import { fmtKg, fmtLongDate } from '@/lib/fitness/format';
+
+// `recharts` is ~300 KB — load it lazily so the page shell and stats
+// paint before the chart downloads.
+const MuscleFrequencyChart = dynamic(
+  () => import('@/components/fitness/charts/muscle-frequency-chart'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
+        Loading chart…
+      </div>
+    ),
+  },
+);
 
 /**
  * MuscleDetailView — drill-down for a single muscle group.
@@ -36,9 +40,13 @@ import { fmtKg, fmtLongDate } from '@/lib/fitness/format';
 export default function MuscleDetailView({
   muscle,
   summary,
+  exercises,
 }: {
   muscle: string;
   summary: MuscleSummary;
+  /** Server-computed exercise summaries — passed down so the
+   *  "Mapped exercises" list doesn't re-run the whole engine. */
+  exercises: ExerciseSummary[];
 }) {
   const [currentSummary, setCurrentSummary] = useState(summary);
   const [currentStatus, setCurrentStatus] = useState(summary.onTarget);
@@ -129,48 +137,10 @@ export default function MuscleDetailView({
           </div>
         ) : (
           <div className="h-56 sm:h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={series} margin={{ top: 8, right: 6, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(63,63,70,0.4)" strokeDasharray="2 4" />
-                <XAxis
-                  dataKey="week"
-                  tickFormatter={(d) => new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  minTickGap={20}
-                />
-                <YAxis
-                  allowDecimals={false}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={28}
-                />
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                  labelFormatter={(l) => fmtLongDate(l as string)}
-                />
-                <ReferenceLine
-                  y={currentSummary.targetSessionsPerWeek}
-                  stroke="#f43f5e"
-                  strokeDasharray="4 4"
-                  strokeOpacity={0.6}
-                />
-                <Bar dataKey="sessions" isAnimationActive={false}>
-                  {series.map((p, idx) => {
-                    const ratio = p.sessions / Math.max(1, currentSummary.targetSessionsPerWeek);
-                    const color =
-                      ratio < 0.6
-                        ? '#f59e0b'
-                        : ratio > 1.2 && currentSummary.targetSessionsPerWeek > 0
-                          ? '#38bdf8'
-                          : '#34d399';
-                    return <Cell key={idx} fill={color} />;
-                  })}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            <MuscleFrequencyChart
+              series={series}
+              targetSessionsPerWeek={currentSummary.targetSessionsPerWeek}
+            />
           </div>
         )}
       </section>
@@ -184,7 +154,7 @@ export default function MuscleDetailView({
         onSave={save}
       />
 
-      <ExercisesForMuscle muscle={muscle} />
+      <ExercisesForMuscle muscle={muscle} exercises={exercises} />
     </div>
   );
 }
@@ -308,7 +278,13 @@ function TargetEditor({
   );
 }
 
-function ExercisesForMuscle({ muscle }: { muscle: string }) {
+function ExercisesForMuscle({
+  muscle,
+  exercises,
+}: {
+  muscle: string;
+  exercises: ExerciseSummary[];
+}) {
   const [list, setList] = useState<
     Array<{ name: string; heaviest: number | null; last: string | null }>
   >([]);
@@ -330,10 +306,12 @@ function ExercisesForMuscle({ muscle }: { muscle: string }) {
       const names = ((data ?? []) as Array<{ exercise_name: string }>).map(
         (r) => r.exercise_name,
       );
-      const calcs = await computeHevyCalculations(userId);
+      // Use the server-computed summaries passed down — no re-running
+      // the whole calculation engine for this small lookup.
+      const byName = new Map(exercises.map((e) => [e.name, e]));
       const rows = names
         .map((name) => {
-          const e = calcs.exercises.find((x) => x.name === name);
+          const e = byName.get(name);
           return {
             name,
             heaviest: e?.heaviestWeightKg ?? null,
@@ -348,7 +326,7 @@ function ExercisesForMuscle({ muscle }: { muscle: string }) {
     return () => {
       cancelled = true;
     };
-  }, [muscle]);
+  }, [muscle, exercises]);
 
   return (
     <section className="rounded-2xl border border-zinc-800/40 bg-zinc-950/40 p-4">
@@ -417,10 +395,4 @@ function Stat({
   );
 }
 
-const tooltipStyle: React.CSSProperties = {
-  background: '#18181b',
-  border: '1px solid #3f3f46',
-  borderRadius: 8,
-  color: '#e4e4e7',
-  fontSize: 11,
-};
+

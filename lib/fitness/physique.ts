@@ -26,6 +26,7 @@ import type { PhysiquePhoto, PhysiquePoseLabel } from './types';
 import {
   deletePhysiquePhoto as deletePhotoObject,
   signedPhysiquePhotoUrl,
+  signedPhysiquePhotoUrls,
   uploadPhysiquePhoto,
 } from './storage';
 import { logEvent, EventTypes } from '@/lib/events';
@@ -135,11 +136,13 @@ export function coverErrorToUserMessage(err: SupabaseFailure): string {
  * List the user's photos. Default order is newest-first by
  * `taken_at`. Pass `favouritedOnly: true` to fetch only starred rows
  * (used by the Timeline). Pass `archiveSort: true` to keep starred
- * photos at the top when sorting the Gallery.
+ * photos at the top when sorting the Gallery. Pass `limit` to bound
+ * the number of rows AND signed URLs (the dashboard only needs the
+ * newest few; the gallery passes no limit).
  */
 export async function listPhysiquePhotos(
   userId: string | null,
-  opts?: { favouritedOnly?: boolean; archiveSort?: boolean },
+  opts?: { favouritedOnly?: boolean; archiveSort?: boolean; limit?: number },
 ): Promise<HydratedPhoto[]> {
   if (!userId) return [];
 
@@ -159,6 +162,9 @@ export async function listPhysiquePhotos(
     } else {
       q = q.order('taken_at', { ascending: false });
     }
+    if (opts?.limit) {
+      q = q.limit(opts.limit);
+    }
     const { data, error } = await q;
     if (error) {
       console.warn('[fitness] listPhysiquePhotos query error:', error.message);
@@ -167,14 +173,14 @@ export async function listPhysiquePhotos(
     return (data ?? []) as PhysiquePhoto[];
   }, []);
 
-  // Sign URLs in parallel — each is independent.
-  const hydrated = await Promise.all(
-    rows.map(async (p) => ({
-      ...p,
-      url: await signedPhysiquePhotoUrl(p.photo_path, 3600),
-    })),
+  // Sign every URL in ONE storage round-trip.
+  const urlByPath = await signedPhysiquePhotoUrls(
+    rows.map((p) => p.photo_path),
   );
-  return hydrated;
+  return rows.map((p) => ({
+    ...p,
+    url: urlByPath.get(p.photo_path) ?? null,
+  }));
 }
 
 export interface CreatePhysiquePhotoInput {
@@ -211,7 +217,7 @@ export async function createPhysiquePhoto(
       return null;
     }
     const photo = data as PhysiquePhoto;
-    const url = await signedPhysiquePhotoUrl(photo.photo_path, 3600);
+    const url = await signedPhysiquePhotoUrl(photo.photo_path);
     return { ...photo, url };
   }, null);
 }

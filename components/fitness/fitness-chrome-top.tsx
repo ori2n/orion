@@ -34,7 +34,7 @@ export function FitnessChromeTop() {
   });
 
   return (
-    <header className="relative z-10 border-b border-zinc-800/50 px-6 py-3">
+    <header className="relative z-10 border-b border-zinc-800/50 px-4 py-2 sm:px-6 sm:py-3">
       <div className="mx-auto flex max-w-7xl items-center justify-between">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">

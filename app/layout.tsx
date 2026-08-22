@@ -1,8 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import AuthButton from '@/components/auth-button';
+import { AppHeader } from '@/components/app-header';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -55,42 +54,21 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="h-full flex flex-col">
-        <nav className="flex items-center gap-6 border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
-          <Link
-            href="/"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Home
-          </Link>
-          <Link
-            href="/time-management"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Time Management
-          </Link>
-          <Link
-            href="/fitness"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Fitness
-          </Link>
-          <Link
-            href="/settings"
-            className="text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Settings
-          </Link>
-
-          <div className="ml-auto flex items-center gap-4">
-            <AuthButton />
-          </div>
-        </nav>
-        {/* flex-1 + min-h-0 lets each route control its own scroll
-            container (e.g. /time-management stays fully static, /fitness keeps
-            its own overflow-y-auto). The old `overflow-y-auto` here
-            forced every page to scroll even when the child could have
-            fit without one. */}
+      {/* body keeps a definite height (h-full) so flex children like the
+          time-management dashboard can fill the viewport. Content that is
+          taller than the viewport simply overflows the body (overflow is
+          visible), so the DOCUMENT scrolls naturally — no nested scroll
+          containers, which is what made vertical swiping unreliable on
+          phones. */}
+      <body className="flex h-full flex-col">
+        {/* Sticky compact header. It owns the safe-area top padding, so
+            the interactive section dropdown always sits below the iOS
+            status bar / notch (taps under the status bar are dead in
+            standalone PWA mode). */}
+        <AppHeader />
+        {/* flex-1 + min-h-0 gives each route a definite available height;
+            routes that opt out (fitness) grow past it and scroll the
+            document instead. */}
         <div className="flex min-h-0 flex-1 flex-col">
           {children}
         </div>

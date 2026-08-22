@@ -1,17 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  YAxis,
-  XAxis,
-  Tooltip,
-  ReferenceLine,
-  CartesianGrid,
-} from 'recharts';
 import { getCurrentUserId } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
@@ -29,6 +20,24 @@ import {
 } from '@/lib/fitness/physique';
 import { listHevyWorkouts } from '@/lib/fitness/hevy/history';
 import type { WeightEntry, WeightTarget } from '@/lib/fitness/types';
+
+// `recharts` is ~300 KB — load it lazily so the dashboard shell and
+// stats paint before the chart downloads.
+const BodyweightTrendChart = dynamic(
+  () => import('@/components/fitness/charts/bodyweight-trend-chart'),
+  {
+    ssr: false,
+    loading: () => <ChartLoading />,
+  },
+);
+
+function ChartLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
+      Loading chart…
+    </div>
+  );
+}
 import {
   fmtKg,
   fmtLongDate,
@@ -89,11 +98,14 @@ export default function FitnessOverview() {
         setLoading(false);
         return;
       }
+      // The dashboard only renders the newest cover photo — fetch the
+      // newest 24 rows so we never sign URLs for (or download) the whole
+      // library. `hasAny` stays correct as long as at least one exists.
       const [calcs, weights, weightTarget, photos, recent] = await Promise.all([
         computeHevyCalculations(userId),
         listWeightEntries(userId),
         getWeightTarget(userId),
-        listPhysiquePhotos(userId),
+        listPhysiquePhotos(userId, { limit: 24 }),
         listHevyWorkouts(userId, 3),
       ]);
       if (cancelled) return;
@@ -402,8 +414,6 @@ function BodyweightPanel({
   }));
   const current = sortedAsc[sortedAsc.length - 1];
   const currentMa = maSeries[maSeries.length - 1]?.ma ?? null;
-  const tickFmt = (iso: string) =>
-    new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' });
 
   return (
     <div>
@@ -427,64 +437,11 @@ function BodyweightPanel({
         />
       </div>
       <div className="h-44 sm:h-48">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartSeries} margin={{ top: 8, right: 6, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke="rgba(63,63,70,0.4)" strokeDasharray="2 4" />
-            <XAxis
-              dataKey="week"
-              tickFormatter={tickFmt}
-              tick={{ fontSize: 10, fill: '#71717a' }}
-              axisLine={false}
-              tickLine={false}
-              minTickGap={24}
-            />
-            <YAxis
-              domain={['dataMin - 1', 'dataMax + 1']}
-              tick={{ fontSize: 10, fill: '#71717a' }}
-              axisLine={false}
-              tickLine={false}
-              width={28}
-            />
-            <Tooltip
-              contentStyle={tooltipStyle}
-              labelFormatter={(l) => fmtLongDate(l as string)}
-              formatter={(v, n) => [
-                fmtKg(typeof v === 'number' ? v : Number(v), true),
-                n === 'ma' ? '12w avg' : 'Measurement',
-              ]}
-            />
-            {target && (
-              <ReferenceLine
-                y={Number(target.target_kg)}
-                stroke="#f43f5e"
-                strokeDasharray="4 4"
-                strokeOpacity={0.6}
-                label={{
-                  value: 'target',
-                  fill: '#f43f5e',
-                  fontSize: 10,
-                  position: 'insideBottomRight',
-                }}
-              />
-            )}
-            <Line
-              type="monotone"
-              dataKey="raw"
-              stroke="#52525b"
-              strokeWidth={1}
-              dot={false}
-              isAnimationActive={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="ma"
-              stroke="#f43f5e"
-              strokeWidth={2}
-              dot={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
+        <BodyweightTrendChart
+          series={chartSeries}
+          targetKg={target?.target_kg ?? null}
+          targetLabel={!!target}
+        />
       </div>
       <div className="mt-2 text-[11px] text-zinc-500">
         <Link href="/fitness/bodyweight" className="hover:text-zinc-200">
@@ -682,14 +639,14 @@ function PhysiquePanel({
             ? 'Open the Physique gallery to star a photo as the album cover.'
             : 'Upload a progress session and star one photo as the cover.'
         }
-        ctaHref="/physique"
-        ctaLabel="Open Physique"
+        ctaHref="/fitness/bodyweight"
+        ctaLabel="Open Bodyweight"
       />
     );
   }
   return (
     <Link
-      href="/physique"
+      href="/fitness/bodyweight"
       className="group block overflow-hidden rounded-xl border border-zinc-800/40 bg-zinc-950/40 transition-colors hover:border-zinc-700"
     >
       <div className="relative aspect-[4/5] w-full bg-zinc-900 sm:aspect-[3/4]">
@@ -700,6 +657,7 @@ function PhysiquePanel({
             alt={`Latest progress — ${photo.taken_at}`}
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
             loading="lazy"
+            decoding="async"
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
@@ -923,14 +881,6 @@ function EmptyHint({
     </div>
   );
 }
-
-const tooltipStyle: React.CSSProperties = {
-  background: '#18181b',
-  border: '1px solid #3f3f46',
-  borderRadius: 8,
-  color: '#e4e4e7',
-  fontSize: 11,
-};
 
 /** Index of the entry whose `recorded_at` is closest to `target`. */
 function findClosestIndex(

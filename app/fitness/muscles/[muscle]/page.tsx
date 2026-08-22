@@ -32,5 +32,5 @@ export default async function MusclePage({
   const calcs = await computeHevyCalculations(userId, undefined, db);
   const summary = calcs.muscles.find((m) => m.muscle === decoded);
   if (!summary) notFound();
-  return <MuscleDetailView muscle={decoded} summary={summary} />;
+  return <MuscleDetailView muscle={decoded} summary={summary} exercises={calcs.exercises} />;
 }

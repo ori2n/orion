@@ -11,6 +11,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { invalidateHevyCalculationsCache } from './calc-cache';
 
 // ─── Row ────────────────────────────────────────────────────────────
 
@@ -110,6 +111,7 @@ export async function upsertMuscleTarget(
       console.warn('[hevy-muscle-targets] upsert error:', error.message);
       return false;
     }
+    invalidateHevyCalculationsCache(userId);
     return true;
   } catch (err) {
     console.warn('[hevy-muscle-targets] upsert exception:', err);

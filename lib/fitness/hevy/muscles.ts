@@ -9,6 +9,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { invalidateHevyCalculationsCache } from './calc-cache';
 import {
   DEFAULT_EXERCISE_MUSCLES,
   isMuscle,
@@ -103,6 +104,8 @@ export async function seedDefaultMuscleMap(
       console.warn('[hevy-muscles] seed error:', error.message);
       return 0;
     }
+    // Seeding changes the muscle map the engine reads.
+    invalidateHevyCalculationsCache(userId);
     return rows.length;
   } catch (err) {
     console.warn('[hevy-muscles] seed exception:', err);
@@ -142,6 +145,7 @@ async function upsertMeta(
       console.warn('[hevy-muscles] upsert error:', error.message);
       return false;
     }
+    invalidateHevyCalculationsCache(userId);
     return true;
   } catch (err) {
     console.warn('[hevy-muscles] upsert exception:', err);

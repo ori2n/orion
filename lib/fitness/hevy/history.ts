@@ -14,6 +14,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { invalidateHevyCalculationsCache } from './calc-cache';
 import type {
   HevyDeleteImportResult,
   HevyImportRecord,
@@ -157,6 +158,7 @@ export async function deleteHevyImport(
       .eq('id', importId);
     if (impErr) throw impErr;
 
+    invalidateHevyCalculationsCache(userId);
     return { ok: true, deletedWorkouts: workoutIds.length, deletedSets };
   } catch (err) {
     console.warn('[hevy-history] delete exception:', err);
@@ -298,6 +300,7 @@ export async function updateHevyWorkout(
       console.warn('[hevy-history] updateWorkout error:', error.message);
       return false;
     }
+    invalidateHevyCalculationsCache(userId);
     return true;
   } catch (err) {
     console.warn('[hevy-history] updateWorkout exception:', err);

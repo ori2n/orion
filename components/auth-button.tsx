@@ -51,7 +51,7 @@ export default function AuthButton() {
 
   return (
     <div className="flex items-center gap-3">
-      <span className="text-xs text-zinc-400 dark:text-zinc-500">
+      <span className="hidden text-xs text-zinc-400 dark:text-zinc-500 sm:inline">
         {email}
       </span>
       <form action={signOut}>

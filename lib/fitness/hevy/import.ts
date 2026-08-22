@@ -13,6 +13,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import { computeWorkoutContentHash, parseHevyCsv } from './parser';
+import { invalidateHevyCalculationsCache } from './calc-cache';
 import type {
   HevyExercise,
   HevyImportDiagnostics,
@@ -335,6 +336,9 @@ export async function importHevyCsv(
     if (finalizeError) {
       console.warn('[hevy-import] finalise error:', finalizeError.message);
     }
+
+    // Imported data changed — drop any cached dashboard metrics.
+    invalidateHevyCalculationsCache(userId);
 
     return {
       importId,

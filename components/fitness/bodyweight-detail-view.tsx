@@ -1,16 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  ReferenceLine,
-} from 'recharts';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import {
   listWeightEntries,
@@ -26,6 +17,21 @@ import {
   fmtLongDate,
   twelveWeekMovingAverage,
 } from '@/lib/fitness/format';
+import PhysiqueProgress from '@/components/fitness/physique-progress';
+
+// `recharts` is ~300 KB — load it lazily so the page shell, photos and
+// stats paint before the chart downloads.
+const BodyweightTrendChart = dynamic(
+  () => import('@/components/fitness/charts/bodyweight-trend-chart'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
+        Loading chart…
+      </div>
+    ),
+  },
+);
 
 /**
  * BodyweightDetailView — full history + chart + CRUD form (Stage 5 §5).
@@ -56,6 +62,10 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
   // Target form state.
   const [targetKg, setTargetKg] = useState('90');
   const [targetNotes, setTargetNotes] = useState('');
+
+  // Bumped after a physique photo upload so the progress surface
+  // refetches and shows the new session in the timeline / gallery.
+  const [physiqueRefreshKey, setPhysiqueRefreshKey] = useState(0);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -163,12 +173,20 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
           Bodyweight
         </div>
         <h1 className="mt-1 text-2xl font-semibold tracking-tight text-zinc-100">
-          Weight trend
+          Body progress
         </h1>
         <p className="mt-1 text-xs text-zinc-500">
-          Raw measurements + 12-week moving average.
+          Physique progress photos + weight trend.
         </p>
       </header>
+
+      {/* ── Physique photos: latest, timeline, gallery, upload ── */}
+      <PhysiqueProgress
+        userId={userId}
+        refreshKey={physiqueRefreshKey}
+        onSaved={() => setPhysiqueRefreshKey((k) => k + 1)}
+      />
+      <div className="mb-8" />
 
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Stat
@@ -242,56 +260,10 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
           </div>
         ) : (
           <div className="h-72 sm:h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartSeries} margin={{ top: 8, right: 6, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(63,63,70,0.4)" strokeDasharray="2 4" />
-                <XAxis
-                  dataKey="week"
-                  tickFormatter={(d) => new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  minTickGap={32}
-                />
-                <YAxis
-                  domain={['dataMin - 1', 'dataMax + 1']}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={32}
-                />
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                  labelFormatter={(l) => fmtLongDate(l as string)}
-                  formatter={(v, n) => [
-                    fmtKg(typeof v === 'number' ? v : Number(v), true),
-                    n === 'ma' ? '12w avg' : 'Measurement',
-                  ]}
-                />
-                {target && (
-                  <ReferenceLine
-                    y={Number(target.target_kg)}
-                    stroke="#f43f5e"
-                    strokeDasharray="4 4"
-                    strokeOpacity={0.6}
-                  />
-                )}
-                <Line
-                  dataKey="raw"
-                  stroke="#52525b"
-                  strokeWidth={1}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-                <Line
-                  dataKey="ma"
-                  stroke="#f43f5e"
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <BodyweightTrendChart
+              series={chartSeries}
+              targetKg={target?.target_kg ?? null}
+            />
           </div>
         )}
       </section>
@@ -465,10 +437,4 @@ function Stat({
   );
 }
 
-const tooltipStyle: React.CSSProperties = {
-  background: '#18181b',
-  border: '1px solid #3f3f46',
-  borderRadius: 8,
-  color: '#e4e4e7',
-  fontSize: 11,
-};
+

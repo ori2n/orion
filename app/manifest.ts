@@ -6,7 +6,7 @@ import type { MetadataRoute } from 'next';
  * `display: "standalone"` is what makes iOS "Add to Home Screen" launch
  * ORION as a full-screen app (no Safari URL bar) instead of a bookmark.
  * `scope` + `start_url` at "/" keep every section (fitness, actions,
- * settings…) inside the standalone window during client-side navigation.
+ * freebuff…) inside the standalone window during client-side navigation.
  */
 export default function manifest(): MetadataRoute.Manifest {
   return {

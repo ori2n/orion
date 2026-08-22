@@ -8,6 +8,10 @@
  */
 import { supabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  getCachedHevyCalculations,
+  setCachedHevyCalculations,
+} from './calc-cache';
 import { listExerciseMeta, type Muscle } from './muscles';
 import {
   listMuscleTargets,
@@ -106,6 +110,16 @@ export async function computeHevyCalculations(
     totalSets: 0,
   };
   if (!userId) return empty;
+
+  // Only cache the default browser-client calls (same userId, no
+  // override, default `db`). Server calls pass their own `db` and
+  // always run fresh. Every write path invalidates the cache, so a
+  // cached hit is only ever ≤60 s stale across tabs.
+  const cacheable = targetsOverride === undefined && db === supabase;
+  if (cacheable) {
+    const cached = getCachedHevyCalculations(userId);
+    if (cached) return cached;
+  }
 
   try {
     const [workouts, exercises, sets, meta, storedTargets] = await Promise.all([
@@ -312,7 +326,7 @@ export async function computeHevyCalculations(
       .filter((n) => !muscleBy.has(n))
       .sort();
 
-    return {
+    const result: HevyCalculations = {
       exercises: exercisesSummary,
       weekly: weeklyBuckets,
       muscles,
@@ -320,6 +334,8 @@ export async function computeHevyCalculations(
       totalVolumeKg: Math.round(exercisesSummary.reduce((n, e) => n + e.totalVolumeKg, 0) * 100) / 100,
       totalSets: exercisesSummary.reduce((n, e) => n + e.totalSets, 0),
     };
+    if (cacheable) setCachedHevyCalculations(userId, result);
+    return result;
   } catch (err) {
     console.warn('[hevy-calculations] exception:', err);
     return empty;
