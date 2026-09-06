@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppHeader } from '@/components/app-header';
+import LazyAiChat from '@/components/ai/lazy-ai-chat';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -72,6 +73,7 @@ export default function RootLayout({
         <div className="flex min-h-0 flex-1 flex-col">
           {children}
         </div>
+        <LazyAiChat />
       </body>
     </html>
   );

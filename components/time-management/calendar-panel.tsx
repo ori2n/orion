@@ -1,43 +1,17 @@
 'use client';
 
-/**
- * CalendarPanel — full v2 calendar for /time-management.
- *
- * Replaces the previous tiny `CalendarTodayPanel` placeholder with the
- * redesigned UI: Day/Week/Month views, click-and-drag to create, drag
- * existing events to move or resize, free-time visualisation, live
- * current-time indicator that auto-scrolls into view on Today, NL
- * quick-add, and a voice button (Web Speech API when available).
- *
- * Storage shape: a `CalendarEvent` row per occurrence; recurring events
- * are stored as ONE row with a JSON `recurrence` field — the actual
- * occurrence expansion (next N weeks) is a follow-up.
- *
- * Drop-in props match the v1 wiring: receives `events` from the parent
- * (ActionsPage owns the fetch via loadData) and calls `onMutate()` after
- * any successful write so the parent can refetch.
- */
-
-import {
-  useState,
-  useEffect,
-  useRef,
-  useMemo,
-  useCallback,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentUserId } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import { getTasks } from '@/lib/tasks';
+import { getTasks, insertTask } from '@/lib/tasks';
 import type { Task } from '@/lib/tasks';
-
-// ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface CalendarEvent {
   id: string;
   user_id: string;
   title: string;
-  start_at: string; // ISO 8601
-  end_at: string;   // ISO 8601
+  start_at: string;
+  end_at: string;
   color?: string | null;
   location?: string | null;
   notes?: string | null;
@@ -48,8 +22,10 @@ export interface CalendarEvent {
   updated_at?: string;
 }
 
-type View = 'day' | 'week' | 'month';
-type RecurrenceFreq = 'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
+export interface ExpandedEvent extends CalendarEvent {
+  sid: string;
+  isVirtual: boolean;
+}
 
 export interface HabitSummary {
   id: string;
@@ -58,489 +34,169 @@ export interface HabitSummary {
   frequency?: string;
 }
 
-interface CalendarPanelProps {
-  /**
-   * Optional. If omitted, CalendarPanel fetches its own events from
-   * Supabase on mount and after each mutation.
-   */
+type View = 'week' | 'month';
+type RecurrenceFreq = 'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+type CalendarPanelProps = {
   events?: CalendarEvent[];
-  /**
-   * Optional refetch hook. If omitted, the panel's own internal fetch
-   * runs after every successful write.
-   */
   onMutate?: () => Promise<void> | void;
-  /**
-   * External "something outside the panel changed" trigger. When this
-   * prop changes value, the panel refetches its own internal data.
-   * Use the parent's `useState` counter to bump it after explicit
-   * cross-system actions (e.g. "Schedule this habit" inserts a new
-   * calendar_event row without going through the panel's own
-   * `handleSave` path).
-   */
   refreshKey?: number;
-  /**
-   * Habits surfaced read-only in the sidebar's Today/Upcoming list.
-   * Provided by the parent so the list stays in sync with the Habits
-   * tab without a second fetch.
-   */
   habits?: HabitSummary[];
-  /**
-   * Today's completed habit ids — used to derive "incomplete" habits
-   * for the sidebar. Habits remain habits; this never creates events.
-   */
   habitCompletions?: Set<string>;
-  /**
-   * Called after a sidebar drag-drop successfully creates a calendar
-   * event. The parent uses it to bump its own refresh triggers.
-   */
   onSidebarSchedule?: () => void;
-}
+};
 
-// ─── Constants ────────────────────────────────────────────────────────────
-
-const PRESET_COLORS: ReadonlyArray<{ name: string | null; cls: string; label: string }> = [
-  { name: null,             cls: 'bg-zinc-200 dark:bg-zinc-700', label: 'none' },
-  { name: 'bg-rose-500',    cls: 'bg-rose-500',    label: 'rose' },
-  { name: 'bg-amber-500',   cls: 'bg-amber-500',   label: 'amber' },
-  { name: 'bg-emerald-500', cls: 'bg-emerald-500', label: 'emerald' },
-  { name: 'bg-sky-500',     cls: 'bg-sky-500',     label: 'sky' },
-  { name: 'bg-violet-500',  cls: 'bg-violet-500',  label: 'violet' },
-];
-
-const HOUR_FLOOR = 6;
-const HOUR_CEIL = 23;
+const HOUR_FLOOR = 0;
+const HOUR_CEIL = 24;
 const PX_PER_HOUR = 60;
-const PX_PER_MIN = PX_PER_HOUR / 60;
-const TOTAL_HOURS = HOUR_CEIL - HOUR_FLOOR + 1; // 18
-const TIMELINE_HEIGHT_PX = TOTAL_HOURS * PX_PER_HOUR;
+const PX_PER_MINUTE = PX_PER_HOUR / 60;
 const SNAP_MINUTES = 15;
-
+const TIMELINE_HEIGHT = (HOUR_CEIL - HOUR_FLOOR) * PX_PER_HOUR;
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEKDAY_CODES = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+const MONTH_WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const COLORS = [
+  { name: null, cls: 'bg-zinc-300 dark:bg-zinc-700', label: 'none' },
+  { name: 'bg-rose-500', cls: 'bg-rose-500', label: 'rose' },
+  { name: 'bg-amber-500', cls: 'bg-amber-500', label: 'amber' },
+  { name: 'bg-emerald-500', cls: 'bg-emerald-500', label: 'emerald' },
+  { name: 'bg-sky-500', cls: 'bg-sky-500', label: 'sky' },
+  { name: 'bg-violet-500', cls: 'bg-violet-500', label: 'violet' },
+] as const;
 
-// Sunday-first weekday labels for the Outlook/Google-style month grid.
-const WEEKDAYS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const WEEKDAYS_SUN_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function pad2(n: number): string {
-  return String(n).padStart(2, '0');
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
 }
 
-function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+function ymd(date: Date): string {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
-function startOfWeek(d: Date): Date {
-  const x = startOfDay(d);
-  // ISO week: Monday is day 1
-  const dow = (x.getDay() + 6) % 7;
-  x.setDate(x.getDate() - dow);
-  return x;
+function startOfDay(date: Date): Date {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
 }
 
-function startOfMonth(d: Date): Date {
-  const x = startOfDay(d);
-  x.setDate(1);
-  return x;
+function startOfWeek(date: Date): Date {
+  const result = startOfDay(date);
+  result.setDate(result.getDate() - ((result.getDay() + 6) % 7));
+  return result;
 }
 
-function endOfMonth(d: Date): Date {
-  const x = startOfMonth(d);
-  x.setMonth(x.getMonth() + 1);
-  x.setDate(0);
-  return x;
+function startOfMonth(date: Date): Date {
+  const result = startOfDay(date);
+  result.setDate(1);
+  return result;
 }
 
-function sameDay(a: Date, b: Date): boolean {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
+function endOfMonth(date: Date): Date {
+  const result = startOfMonth(date);
+  result.setMonth(result.getMonth() + 1);
+  result.setDate(0);
+  return result;
 }
 
-function weekdayCode(d: Date): 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU' {
-  return ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][d.getDay()] as
-    | 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU';
+function addDays(date: Date, count: number): Date {
+  const result = new Date(date);
+  result.setDate(result.getDate() + count);
+  return result;
 }
 
-function snapMinutes(min: number): number {
-  return Math.round(min / SNAP_MINUTES) * SNAP_MINUTES;
+function sameDay(first: Date, second: Date): boolean {
+  return ymd(first) === ymd(second);
 }
 
-function clampMinutes(min: number): number {
-  return Math.max(0, Math.min((HOUR_CEIL - HOUR_FLOOR) * 60, min));
+function snap(value: number): number {
+  return Math.round(value / SNAP_MINUTES) * SNAP_MINUTES;
 }
 
-function minutesToHM(min: number): { h: number; m: number } {
-  return { h: HOUR_FLOOR + Math.floor(min / 60), m: min % 60 };
+function clampMinute(value: number): number {
+  return Math.max(0, Math.min(TIMELINE_HEIGHT, value));
 }
 
-function minutesFromFloor(date: Date): number {
-  return (date.getHours() - HOUR_FLOOR) * 60 + date.getMinutes();
+function timeLabel(hour: number): string {
+  return `${pad2(hour)}:00`;
 }
 
-function fmtHM(date: Date): string {
+function shortTime(date: Date): string {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
-function fmtLongDate(date: Date): string {
-  return date.toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-  });
-}
-
-function fmtMonthYear(date: Date): string {
+function monthLabel(date: Date): string {
   return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
-function fmtWeekRange(monday: Date): string {
-  const sunday = new Date(monday);
-  sunday.setDate(sunday.getDate() + 6);
-  const sameMonth = monday.getMonth() === sunday.getMonth();
-  if (sameMonth) {
-    return `${monday.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} – ${sunday.getDate()}, ${sunday.getFullYear()}`;
+function weekLabel(date: Date): string {
+  const monday = startOfWeek(date);
+  const sunday = addDays(monday, 6);
+  if (monday.getMonth() === sunday.getMonth()) {
+    return `${monday.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} - ${sunday.getDate()}, ${sunday.getFullYear()}`;
   }
-  return `${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${sunday.getFullYear()}`;
+  return `${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${sunday.getFullYear()}`;
 }
 
-function buildRecurrence(freq: RecurrenceFreq, anchor: Date): string | null {
-  if (freq === 'NONE') return null;
-  const rule: { freq: 'DAILY' | 'WEEKLY' | 'MONTHLY'; byweekday?: string[] } = { freq };
-  if (freq === 'WEEKLY') rule.byweekday = [weekdayCode(anchor)];
-  return JSON.stringify(rule);
-}
-
-function parseRecurrence(s: string | null | undefined): RecurrenceFreq {
-  if (!s) return 'NONE';
+function recurrenceFrequency(value: string | null | undefined): RecurrenceFreq {
+  if (!value) return 'NONE';
   try {
-    const obj = JSON.parse(s);
-    if (obj?.freq === 'DAILY') return 'DAILY';
-    if (obj?.freq === 'WEEKLY') return 'WEEKLY';
-    if (obj?.freq === 'MONTHLY') return 'MONTHLY';
-  } catch { /* ignore */ }
+    const parsed = JSON.parse(value) as { freq?: string };
+    if (parsed.freq === 'DAILY' || parsed.freq === 'WEEKLY' || parsed.freq === 'MONTHLY') return parsed.freq;
+  } catch {
+    // Legacy "manual" values are non-recurring.
+  }
   return 'NONE';
 }
 
-// ─── Recurrence expansion + synthetic occurrences ────────────────────
-//
-// A recurring event is stored as ONE row in calendar_events with a
-// JSON `recurrence` payload. To make the calendar feel like Google
-// Calendar we VISUALISE each occurrence as a separate "virtual" event
-// on its date.
-//
-// Virtual occurrences get a `sid` of the form `vrt-${realId}-${YYYYMMDD}`
-// and `isVirtual: true` so the UI + save layer can tell them apart from
-// real, editable events. Dragging / resizing a virtual occurrence writes
-// the change to THE real underlying event row (so the whole recurring
-// series stays in sync), not to a synthetic instance that doesn't
-// exist in the database.
-
-export interface ExpandedEvent extends CalendarEvent {
-  /** Stable per-(real-event, occurrence) id. */
-  sid: string;
-  /** True when this row is a virtual recurring occurrence. */
-  isVirtual: boolean;
-}
-
-const RECURRENCE_LOOKAHEAD_DAYS = 365;
-
-function padDateKey(d: Date): string {
-  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
-}
-
-function expandRecurrence(
-  ev: CalendarEvent | ExpandedEvent,
-  viewStart: Date,
-  viewEnd: Date,
-): ExpandedEvent[] {
-  // Virtual occurrences are unique per (realId, day) — never re-expand
-  // them again, otherwise we'd nest infinite virtuals on each pass.
-  if ((ev as ExpandedEvent).isVirtual) {
-    return [ev as ExpandedEvent];
-  }
-  const freq = parseRecurrence(ev.recurrence);
-  if (freq === 'NONE') {
-    return [{ ...ev, sid: `real-${ev.id}`, isVirtual: false }];
-  }
-
-  const out: ExpandedEvent[] = [{
-    ...ev,
-    sid: `real-${ev.id}`,
-    isVirtual: false,
-  }];
-
-  const originalStart = new Date(ev.start_at);
-  const originalEnd = new Date(ev.end_at);
-  const durationMs = originalEnd.getTime() - originalStart.getTime();
-  const hh = originalStart.getHours();
-  const mm = originalStart.getMinutes();
-
-  // Compute the inclusive window we care about: 30 days before the
-  // view start (so a recurrence weeks into the past still shows up
-  // when we drag back into its window) up to (lookahead) past view end.
-  const horizonStart = new Date(viewStart);
-  horizonStart.setDate(horizonStart.getDate() - 30);
-  const horizonEnd = new Date(viewEnd);
-  horizonEnd.setDate(horizonEnd.getDate() + RECURRENCE_LOOKAHEAD_DAYS);
-
-  // WEEKLY also supports multi-day rules — read byweekday out of JSON.
-  let byweekday: Set<number> | null = null;
-  if (freq === 'WEEKLY') {
-    try {
-      const obj = JSON.parse(ev.recurrence ?? '{}');
-      const mapping: Record<string, number> = {
-        SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
-      };
-      if (Array.isArray(obj?.byweekday) && obj.byweekday.length > 0) {
-        const mapped: Array<number | undefined> = obj.byweekday.map(
-          (d: string) => mapping[d],
-        );
-        byweekday = new Set(mapped.filter((n: number | undefined): n is number => typeof n === 'number'));
-      }
-    } catch { /* ignore */ }
-    if (!byweekday || byweekday.size === 0) {
-      byweekday = new Set([originalStart.getDay()]);
-    }
-  }
-
-  const pushVirtual = (cur: Date) => {
-    // Skip dates that exactly equal the original occurrence.
-    if (sameDay(cur, originalStart)) return;
-    // Skip dates that would fall before the original (defensive).
-    if (cur.getTime() < originalStart.getTime()) return;
-    if (cur < horizonStart || cur > horizonEnd) return;
-    const start = new Date(cur);
-    start.setHours(hh, mm, 0, 0);
-    const end = new Date(start.getTime() + durationMs);
-    out.push({
-      ...ev,
-      sid: `vrt-${ev.id}-${padDateKey(cur)}`,
-      isVirtual: true,
-      start_at: start.toISOString(),
-      end_at: end.toISOString(),
-    });
-  };
-
-  if (freq === 'DAILY') {
-    const cur = startOfDay(horizonStart);
-    while (cur <= horizonEnd) {
-      pushVirtual(cur);
-      cur.setDate(cur.getDate() + 1);
-    }
-  } else if (freq === 'WEEKLY' && byweekday) {
-    const cur = startOfDay(horizonStart);
-    while (cur <= horizonEnd) {
-      if (byweekday.has(cur.getDay())) pushVirtual(cur);
-      cur.setDate(cur.getDate() + 1);
-    }
-  } else if (freq === 'MONTHLY') {
-    // Same day-of-month each month, anchored to the original date.
-    const cur = startOfMonth(originalStart);
-    cur.setMonth(cur.getMonth() + 1);
-    while (cur <= horizonEnd) {
-      const occ = new Date(cur);
-      occ.setDate(originalStart.getDate());
-      pushVirtual(occ);
-      cur.setMonth(cur.getMonth() + 1);
-    }
-  }
-
-  return out;
-}
-
-function expandAllForRange(
-  events: CalendarEvent[],
-  viewStart: Date,
-  viewEnd: Date,
-): ExpandedEvent[] {
-  return events.flatMap((e) => expandRecurrence(e, viewStart, viewEnd));
-}
-
-/**
- * Greedy side-by-side packer for overlapping events on a single day.
- *
- * Algorithm: sort events by (start asc, end desc). Walk through them,
- * keeping an `active` set of previously-placed events whose end-time
- * is still in the future at current event's start-time.
- *
- *   - Drop ended events from active.
- *   - If active went from non-empty to empty, we've crossed a cluster
- *     boundary — reset the per-cluster max-cols counter.
- *   - Pick the lowest column index not taken by `active`. Insert.
- *   - Track the per-cluster max-cols (`cols`).
- *
- * Output: { event.sid → { col, cols, clusterCols } }, where `cols` is
- * the total column count of the cluster the event belongs to. CSS then
- * sets `width = (1 / cols) * (100% − gutter%)` and `left = col * that +
- * gutter%`.
- */
-const GUTTER_PCT = 14; // % for hour-label gutter in day view
-
-interface OverlapInfo {
-  col: number;
-  cols: number;
-  clusterCols: number;
-}
-
-function layoutOverlappingEvents(
-  events: ExpandedEvent[],
-): Map<string, OverlapInfo> {
-  const out = new Map<string, OverlapInfo>();
-  if (events.length === 0) return out;
-
-  // Sort: earlier start first; longer duration first so a 9-10am
-  // meeting gets col=0 ahead of an 8-8:30am quick call to its left.
-  const sorted = [...events].sort((a, b) => {
-    const sa = new Date(a.start_at).getTime();
-    const sb = new Date(b.start_at).getTime();
-    if (sa !== sb) return sa - sb;
-    const ea = new Date(a.end_at).getTime();
-    const eb = new Date(b.end_at).getTime();
-    if (ea !== eb) return eb - ea;
-    return a.id.localeCompare(b.id);
+function recurrenceJson(freq: RecurrenceFreq, date: Date): string | null {
+  if (freq === 'NONE') return null;
+  return JSON.stringify({
+    freq,
+    ...(freq === 'WEEKLY' ? { byweekday: [WEEKDAY_CODES[(date.getDay() + 6) % 7]] } : {}),
   });
-
-  type ActiveCol = { ev: ExpandedEvent; col: number; endMs: number };
-  const active: ActiveCol[] = [];
-
-  // Tracks the column count of the cluster currently being built.
-  let cols = 0;
-
-  for (const ev of sorted) {
-    const startMs = new Date(ev.start_at).getTime();
-    const endMs = new Date(ev.end_at).getTime();
-
-    // Remove events whose end is <= current start (no longer overlap).
-    const remaining: ActiveCol[] = [];
-    for (const a of active) {
-      if (a.endMs > startMs) remaining.push(a);
-    }
-
-    // Cluster boundary: we WERE tracking a non-empty set, and after
-    // removing ended entries it's empty. Reset per-cluster max cols.
-    if (active.length > 0 && remaining.length === 0) {
-      cols = 0;
-    }
-    active.length = 0;
-    active.push(...remaining);
-
-    // Pick the lowest free column index.
-    const taken = new Set(active.map((a) => a.col));
-    let col = 0;
-    while (taken.has(col)) col += 1;
-    active.push({ ev, col, endMs });
-
-    if (col + 1 > cols) cols = col + 1;
-    out.set(ev.sid, { col, cols, clusterCols: cols });
-  }
-  return out;
 }
 
-function clampDateToTimeline(date: Date, minFloor: Date): Date {
-  const x = new Date(date);
-  if (x.getHours() < HOUR_FLOOR) {
-    x.setHours(HOUR_FLOOR, 0, 0, 0);
+function expandEvent(event: CalendarEvent, rangeStart: Date, rangeEnd: Date): ExpandedEvent[] {
+  const originalStart = new Date(event.start_at);
+  const originalEnd = new Date(event.end_at);
+  const frequency = recurrenceFrequency(event.recurrence);
+  if (frequency === 'NONE') {
+    return [{ ...event, sid: `real-${event.id}`, isVirtual: false }];
   }
-  return x;
-}
 
-// Lightweight NL parser: handles patterns like
-//   "tomorrow at 6"   "tomorrow at 18:00"
-//   "tuesday at 3"   "wed 9am"
-//   "Today 14:00"
-function nlParse(input: string, anchor: Date): { title: string; date: Date } | null {
-  const text = input.trim();
-  if (!text) return null;
-
-  const DN = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-  const lower = text.toLowerCase();
-
-  // Match "<when> at <h>(:<m>)?(am|pm)?" or "<when> <h>am/pm"
-  let whenOffsetDays = 0;
-  let when = anchor;
-
-  // Day-of-week
-  for (let i = 0; i < DN.length; i++) {
-    if (lower.startsWith(DN[i])) {
-      const dow = (i + 6) % 7; // ISO
-      const cur = (anchor.getDay() + 6) % 7;
-      whenOffsetDays = (dow - cur + 7) % 7;
-      when = new Date(anchor);
-      when.setDate(when.getDate() + whenOffsetDays);
-      break;
+  const result: ExpandedEvent[] = [{ ...event, sid: `real-${event.id}`, isVirtual: false }];
+  const duration = Math.max(15 * 60_000, originalEnd.getTime() - originalStart.getTime());
+  const cursor = startOfDay(new Date(Math.max(rangeStart.getTime(), originalStart.getTime())));
+  const last = startOfDay(rangeEnd);
+  const originalDay = originalStart.getDate();
+  let index = 0;
+  while (cursor <= last) {
+    const matches = frequency === 'DAILY'
+      || (frequency === 'WEEKLY' && ((cursor.getDay() + 6) % 7) === ((originalStart.getDay() + 6) % 7))
+      || (frequency === 'MONTHLY' && cursor.getDate() === originalDay);
+    if (matches && !sameDay(cursor, originalStart) && cursor >= startOfDay(originalStart)) {
+      const start = new Date(cursor);
+      start.setHours(originalStart.getHours(), originalStart.getMinutes(), 0, 0);
+      result.push({
+        ...event,
+        sid: `virtual-${event.id}-${ymd(cursor)}-${index++}`,
+        isVirtual: true,
+        start_at: start.toISOString(),
+        end_at: new Date(start.getTime() + duration).toISOString(),
+      });
     }
+    cursor.setDate(cursor.getDate() + 1);
   }
-
-  let title = text;
-  if (whenOffsetDays > 0) {
-    title = text.replace(/^\w+\s*/i, '').trim();
-  }
-
-  if (lower.includes('tomorrow')) {
-    when = new Date(anchor);
-    when.setDate(when.getDate() + 1);
-    title = text.replace(/\btomorrow\b/i, '').trim();
-  } else if (lower.startsWith('today')) {
-    when = new Date(anchor);
-    title = text.replace(/^today\b/i, '').trim();
-  } else if (lower.startsWith('next week')) {
-    when = startOfWeek(anchor);
-    when.setDate(when.getDate() + 7);
-    title = text.replace(/^next week\b/i, '').trim();
-  }
-
-  // Time: "at 6", "at 18:30", "5pm", "10am"
-  let hour = 9; let min = 0; let matchedTime = false;
-  const atMatch = lower.match(/(?:^|\s)at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
-  if (atMatch) {
-    hour = parseInt(atMatch[1], 10);
-    min = atMatch[2] ? parseInt(atMatch[2], 10) : 0;
-    const ampm = atMatch[3];
-    if (ampm === 'pm' && hour < 12) hour += 12;
-    if (ampm === 'am' && hour === 12) hour = 0;
-    title = title.replace(new RegExp(`(?:^|\\s)at\\s+${atMatch[1]}(?::\\d{2})?\\s*(?:am|pm)?`, 'i'), '').trim();
-    matchedTime = true;
-  } else {
-    const bareMatch = lower.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
-    if (bareMatch) {
-      hour = parseInt(bareMatch[1], 10);
-      min = bareMatch[2] ? parseInt(bareMatch[2], 10) : 0;
-      const ampm = bareMatch[3];
-      if (ampm === 'pm' && hour < 12) hour += 12;
-      if (ampm === 'am' && hour === 12) hour = 0;
-      title = title.replace(new RegExp(`\\b\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b`, 'i'), '').trim();
-      matchedTime = true;
-    }
-  }
-
-  when.setHours(matchedTime ? hour : 9, matchedTime ? min : 0, 0, 0);
-
-  // Strip leading connector after the "when" part
-  title = title.replace(/^(at|on|for)\s+/i, '').trim();
-  if (!title) title = 'New event';
-
-  return { title, date: when };
+  return result;
 }
 
-// ─── Hooks ─────────────────────────────────────────────────────────────────
-
-function useNow(): Date {
-  const [now, setNow] = useState<Date>(() => new Date());
-  useEffect(() => {
-    setNow(new Date());
-    const id = setInterval(() => setNow(new Date()), 30_000);
-    return () => clearInterval(id);
-  }, []);
-  return now;
+function expandEvents(events: CalendarEvent[], rangeStart: Date, rangeEnd: Date): ExpandedEvent[] {
+  return events.flatMap((event) => expandEvent(event, rangeStart, rangeEnd));
 }
 
-// ─── Main component ───────────────────────────────────────────────────────
+function eventColor(event: CalendarEvent): { cls: string; dark: boolean } {
+  const match = COLORS.find((color) => color.name === event.color);
+  return { cls: match?.cls ?? 'bg-zinc-300 dark:bg-zinc-700', dark: !event.color };
+}
 
 export default function CalendarPanel({
   events: propEvents,
@@ -550,1967 +206,595 @@ export default function CalendarPanel({
   habitCompletions = new Set<string>(),
   onSidebarSchedule,
 }: CalendarPanelProps = {}) {
-  // Internal fallback: when the parent doesn't pass events/onMutate, we
-  // manage them ourselves. This keeps the component drop-in for callers
-  // who just want <CalendarPanel /> with no wiring.
   const [internalEvents, setInternalEvents] = useState<CalendarEvent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [view, setView] = useState<View>('week');
+  const [anchorDate, setAnchorDate] = useState(() => startOfDay(new Date()));
+  const [editing, setEditing] = useState<ExpandedEvent | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<ExpandedEvent | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<ExpandedEvent | null>(null);
+  const [taskDraft, setTaskDraft] = useState<{ date: string; time: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function handleDeleteKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isEditable = target?.tagName === 'INPUT'
+        || target?.tagName === 'TEXTAREA'
+        || target?.tagName === 'SELECT'
+        || target?.isContentEditable;
+      if (event.key !== 'Delete' || isEditable || !selectedEvent || deleteCandidate) return;
+      event.preventDefault();
+      setDeleteCandidate(selectedEvent);
+    }
+    window.addEventListener('keydown', handleDeleteKey);
+    return () => window.removeEventListener('keydown', handleDeleteKey);
+  }, [deleteCandidate, selectedEvent]);
+
   const internalRefetch = useCallback(async () => {
-    const uid = await getCurrentUserId();
-    if (!uid) return;
-    const { data, error } = await supabase
-      .from('calendar_events')
-      .select('*')
-      .eq('user_id', uid)
-      .order('start_at');
-    if (!error && data) setInternalEvents(data as CalendarEvent[]);
-    // Also refresh the sidebar's todo list in the same pass so it stays
-    // in sync with the To-dos tab without a separate effect.
-    setTasks(await getTasks());
+    const userId = await getCurrentUserId();
+    if (!userId) return;
+    const [eventsResult, nextTasks] = await Promise.all([
+      supabase.from('calendar_events').select('*').eq('user_id', userId).order('start_at'),
+      getTasks(),
+    ]);
+    if (!eventsResult.error) setInternalEvents((eventsResult.data ?? []) as CalendarEvent[]);
+    setTasks(nextTasks);
   }, []);
+
   useEffect(() => {
-    if (propEvents === undefined) {
-      void internalRefetch();
-    }
-  }, [propEvents === undefined, internalRefetch]);
-  // External-poke refresh: bump `refreshKey` from the parent when
-  // something outside the panel (e.g. habit-card "Schedule this" or
-  // todo-card "Add to calendar") wrote a row the panel couldn't see
-  // through its own mutation path.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (propEvents === undefined) void internalRefetch();
+  }, [internalRefetch, propEvents]);
+
   useEffect(() => {
-    if (propEvents === undefined && refreshKey !== undefined) {
-      void internalRefetch();
-    }
-    // We intentionally depend ONLY on `refreshKey` — the internal
-    // refetch function identity changes won't cause an extra fetch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (propEvents === undefined && refreshKey !== undefined) void internalRefetch();
+  }, [internalRefetch, propEvents, refreshKey]);
 
   const events = propEvents ?? internalEvents;
   const onMutate = propOnMutate ?? internalRefetch;
-  const [view, setView] = useState<View>('day');
-  const [anchorDate, setAnchorDate] = useState<Date>(() => startOfDay(new Date()));
-  const [editing, setEditing] = useState<ExpandedEvent | null>(null);
-  const [creating, setCreating] = useState<null | {
-    title: string;
-    startISO: string;
-    endISO: string;
-    allDay: boolean;
-    prefill: string;
-  }>(null);
-  const [nlDraft, setNlDraft] = useState('');
-  const [nlError, setNlError] = useState<string | null>(null);
-
-  const navigate = useCallback(
-    (delta: number, unit: 'day' | 'week' | 'month') => {
-      setAnchorDate((prev) => {
-        const next = new Date(prev);
-        if (unit === 'day') next.setDate(next.getDate() + delta);
-        if (unit === 'week') next.setDate(next.getDate() + 7 * delta);
-        if (unit === 'month') next.setMonth(next.getMonth() + delta);
-        return startOfDay(next);
-      });
-    },
-    [],
+  const monday = startOfWeek(anchorDate);
+  const sunday = addDays(monday, 6);
+  const monthStart = startOfMonth(anchorDate);
+  const monthEnd = endOfMonth(anchorDate);
+  const expandedWeekEvents = useMemo(
+    () => expandEvents(events, monday, addDays(sunday, 1)),
+    [events, monday, sunday],
+  );
+  const expandedMonthEvents = useMemo(
+    () => expandEvents(events, monthStart, monthEnd),
+    [events, monthEnd, monthStart],
   );
 
-  const goToday = useCallback(() => setAnchorDate(startOfDay(new Date())), []);
-
-  // Day-view events: those that span anchorDate (event intersects the day)
-  const dayEvents = useMemo(() => {
-    return events.filter((e) => {
-      const s = new Date(e.start_at);
-      const en = new Date(e.end_at);
-      // All-day multi-day: include if anchor day falls in [event start day, event end day]
-      if (e.all_day) {
-        const dayStart = startOfDay(anchorDate);
-        const dayEnd = new Date(dayStart);
-        dayEnd.setHours(23, 59, 59, 999);
-        return en >= dayStart && s <= dayEnd;
-      }
-      // Recurring: include the underlying rule row so DayView can
-      // expand it into virtual occurrences on this day. Virtual rows
-      // themselves are skipped because their `isVirtual` flag makes
-      // `expandRecurrence` a no-op.
-      if (parseRecurrence(e.recurrence) !== 'NONE') {
-        return true;
-      }
-      // Non-recurring single-day events: include if event starts on
-      // anchorDate OR was still ongoing at start of anchorDate.
-      return sameDay(s, anchorDate) || (s < anchorDate && en > anchorDate);
+  const navigate = useCallback((delta: number) => {
+    setAnchorDate((current) => {
+      const next = new Date(current);
+      if (view === 'week') next.setDate(next.getDate() + delta * 7);
+      else next.setMonth(next.getMonth() + delta);
+      return startOfDay(next);
     });
-  }, [events, anchorDate]);
+  }, [view]);
 
-  // All-day events: expand recurring all-day rules so a recurring
-  // multi-day chip (e.g. "spring break") shows on every visible day.
-  // Non-recurring events pass through unchanged; the chip row uses
-  // start_at.date in the chip label.
-  const allDayEvents = useMemo(() => {
-    const allDay = events.filter((e) => e.all_day);
-    const expanded = expandAllForRange(allDay, anchorDate, anchorDate);
-    const dayEnd = new Date(anchorDate);
-    dayEnd.setHours(23, 59, 59, 999);
-    return expanded
-      .filter((e) => {
-        const s = new Date(e.start_at);
-        const en = new Date(e.end_at);
-        return en >= anchorDate && s <= dayEnd;
-      })
-      .sort((a, b) => a.start_at.localeCompare(b.start_at));
-  }, [events, anchorDate]);
-  // Expand recurring rules so dayView/WeekView/MonthView can show
-  // virtual occurrences on each date the rule fires.
-  const timedEvents = useMemo(
-    () =>
-      expandAllForRange(dayEvents.filter((e) => !e.all_day), anchorDate, anchorDate)
-        .sort((a, b) => a.start_at.localeCompare(b.start_at)),
-    [dayEvents, anchorDate],
-  );
-
-  const handleSaved = useCallback(async () => {
-    await onMutate();
-    setEditing(null);
-    setCreating(null);
-    setNlDraft('');
-    setNlError(null);
-  }, [onMutate]);
-
-  const handleDelete = useCallback(async (id: string) => {
-    const uid = await getCurrentUserId();
-    if (!uid) return;
-    const { error } = await supabase.from('calendar_events').delete().eq('id', id);
-    if (error) {
-      setNlError(`Failed to delete: ${error.message}`);
+  const updateEvent = useCallback(async (id: string, startAt: string, endAt: string) => {
+    setError(null);
+    const { error: updateError } = await supabase
+      .from('calendar_events')
+      .update({ start_at: startAt, end_at: endAt })
+      .eq('id', id);
+    if (updateError) {
+      setError(`Could not update event: ${updateError.message}`);
       return;
     }
     await onMutate();
-    setEditing(null);
   }, [onMutate]);
 
-  const handleNewEvent = useCallback(() => {
-    const start = new Date(anchorDate);
-    start.setHours(9, 0, 0, 0);
-    const end = new Date(start);
-    end.setHours(10, 0, 0, 0);
-    setCreating({
-      title: '',
-      startISO: start.toISOString(),
-      endISO: end.toISOString(),
-      allDay: false,
-      prefill: '',
-    });
-  }, [anchorDate]);
-
-  const handleNLSubmit = useCallback(() => {
-    setNlError(null);
-    const parsed = nlParse(nlDraft, anchorDate);
-    if (!parsed) {
-      setNlError('Try "Tennis Tuesday at 6" or "Lunch tomorrow at 12:30".');
+  const deleteEvent = useCallback(async (id: string) => {
+    const { error: deleteError } = await supabase.from('calendar_events').delete().eq('id', id);
+    if (deleteError) {
+      setError(`Could not delete event: ${deleteError.message}`);
       return;
     }
-    const start = parsed.date;
-    const end = new Date(start);
-    end.setHours(start.getHours() + 1);
-    setCreating({
-      title: parsed.title,
-      startISO: start.toISOString(),
-      endISO: end.toISOString(),
-      allDay: false,
-      prefill: nlDraft,
+    setEditing(null);
+    setSelectedEvent(null);
+    setDeleteCandidate(null);
+    await onMutate();
+  }, [onMutate]);
+
+  const createTaskFromSlot = useCallback(async (title: string, notes: string, repeat: RecurrenceFreq, date: string, time: string) => {
+    const taskResult = await insertTask({ title, scheduled_for: date, notes: notes || null });
+    if (taskResult.error) throw new Error(`Could not add task: ${taskResult.error}`);
+    const userId = await getCurrentUserId();
+    if (!userId) throw new Error('Not signed in.');
+    const start = new Date(`${date}T${time}:00`);
+    const end = new Date(start.getTime() + 30 * 60_000);
+    const { error: eventError } = await supabase.from('calendar_events').insert({
+      user_id: userId,
+      title,
+      start_at: start.toISOString(),
+      end_at: end.toISOString(),
+      notes: notes || null,
+      all_day: false,
+      recurrence: recurrenceJson(repeat, start),
+      source: 'task',
     });
-  }, [nlDraft, anchorDate]);
+    if (eventError) throw new Error(`Task saved, but calendar placement failed: ${eventError.message}`);
+    await onMutate();
+  }, [onMutate]);
 
-  // Handle drag-drop from sidebar onto the calendar timeline.
-  // Creates a calendar event for a habit or task at the dropped time slot.
-  const handleSidebarDrop = useCallback(
-    async (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => {
-      const uid = await getCurrentUserId();
-      if (!uid) return;
-      const startISO = `${dateStr}T${timeStr}:00`;
-      let title = '';
-      let durationMin = 30;
-
-      if (itemType === 'habit') {
-        const habit = habits.find((h) => h.id === itemId);
-        if (!habit) return;
-        title = habit.name;
-        durationMin = habit.duration_minutes ?? 30;
-      } else {
-        const task = tasks.find((t) => t.id === itemId);
-        if (!task) return;
-        title = task.title;
-        durationMin = task.duration_minutes ?? 30;
-      }
-
-      const start = new Date(startISO);
-      const end = new Date(start.getTime() + durationMin * 60_000);
-      const payload = {
-        user_id: uid,
-        title,
-        start_at: start.toISOString(),
-        end_at: end.toISOString(),
-        color: null as string | null,
-        location: null as string | null,
-        notes: null as string | null,
-        all_day: false,
-        recurrence: 'manual',
-      };
-      const { error } = await supabase.from('calendar_events').insert(payload);
-      if (!error) {
-        await onMutate();
-        onSidebarSchedule?.();
-      }
-    },
-    [habits, tasks, onMutate, onSidebarSchedule],
-  );
+  const handleSidebarDrop = useCallback(async (type: 'habit' | 'task', id: string, date: string, time: string) => {
+    const userId = await getCurrentUserId();
+    if (!userId) return;
+    const habit = type === 'habit' ? habits.find((item) => item.id === id) : null;
+    const task = type === 'task' ? tasks.find((item) => item.id === id) : null;
+    const title = habit?.name ?? task?.title;
+    if (!title) return;
+    const duration = habit?.duration_minutes ?? task?.duration_minutes ?? 30;
+    const start = new Date(`${date}T${time}:00`);
+    const { error: insertError } = await supabase.from('calendar_events').insert({
+      user_id: userId,
+      title,
+      start_at: start.toISOString(),
+      end_at: new Date(start.getTime() + duration * 60_000).toISOString(),
+      all_day: false,
+      recurrence: null,
+      source: type,
+    });
+    if (!insertError) {
+      await onMutate();
+      onSidebarSchedule?.();
+    }
+  }, [habits, onMutate, onSidebarSchedule, tasks]);
 
   return (
-    <div className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 md:h-full md:overflow-hidden md:flex-row">
-      {/* Left sidebar — compact mini month + Today/Upcoming list. On
-          mobile it stacks above the day view; on md+ it's a fixed column. */}
-      <aside className="flex w-full shrink-0 flex-col border-b border-zinc-200 dark:border-zinc-800 md:w-64 md:border-b-0 md:border-r">
-        <div className="shrink-0 border-b border-zinc-200 dark:border-zinc-800">
-          <MiniMonthCalendar
-            selectedDate={anchorDate}
-            onSelectDate={(d) => {
-              setAnchorDate(startOfDay(d));
-              setView('day');
-            }}
-          />
-        </div>
-        <div className="min-h-0 overflow-y-auto md:flex-1">
-          <TodayUpcoming
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 md:flex-row">
+      <aside className="flex max-h-[38vh] w-full shrink-0 flex-col border-b border-zinc-200 dark:border-zinc-800 md:max-h-none md:w-64 md:border-b-0 md:border-r">
+        <MiniMonthCalendar
+          key={`${anchorDate.getFullYear()}-${anchorDate.getMonth()}`}
+          selectedDate={anchorDate}
+          onSelectDate={(date) => { setAnchorDate(startOfDay(date)); setView('week'); }}
+        />
+        <div className="min-h-0 flex-1 overflow-y-auto border-t border-zinc-200 dark:border-zinc-800">
+          <CalendarSidebar
             events={events}
             habits={habits}
             completions={habitCompletions}
             tasks={tasks}
-            onSelectDate={(d) => {
-              setAnchorDate(startOfDay(d));
-              setView('day');
-            }}
-            onSidebarDrop={handleSidebarDrop}
+            onSelectDate={(date) => { setAnchorDate(startOfDay(date)); setView('week'); }}
           />
         </div>
       </aside>
 
-      {/* Main — focused day view (week/month remain available). */}
-      <div className="flex min-w-0 flex-1 flex-col min-h-0">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <CalendarHeader
           view={view}
-          setView={setView}
           anchorDate={anchorDate}
-          goToday={goToday}
-          navigate={navigate}
-          onAdd={handleNewEvent}
-          nlDraft={nlDraft}
-          setNlDraft={setNlDraft}
-          onNLSubmit={handleNLSubmit}
-          nlError={nlError}
+          onNavigate={navigate}
+          onToday={() => setAnchorDate(startOfDay(new Date()))}
+          onViewChange={setView}
         />
-
-        <div className="flex-1 md:min-h-0 md:overflow-hidden">
-          {view === 'day' && (
-            <DayView
+        <div className="min-h-0 flex-1">
+          {view === 'week' ? (
+            <WeekTimeline
               anchorDate={anchorDate}
-              allDayEvents={allDayEvents}
-              timedEvents={timedEvents}
-              onCreateRange={(startISO, endISO) =>
-                setCreating({
-                  title: '',
-                  startISO,
-                  endISO,
-                  allDay: false,
-                  prefill: '',
-                })
-              }
-              onUpdateEvent={async (id, iso) => {
-                const uid = await getCurrentUserId();
-                if (!uid) return;
-                // iso is { start_at, end_at }
-                await supabase.from('calendar_events').update(iso).eq('id', id);
-                await onMutate();
-              }}
-              onClickEvent={(e) => setEditing(e)}
+              events={expandedWeekEvents}
+              selectedEventId={selectedEvent?.id ?? null}
+              onClickEvent={(event) => setSelectedEvent(event)}
+              onDoubleClickEvent={(event) => { setSelectedEvent(event); setEditing(event); }}
+              onCreateSlot={(date, time) => { setSelectedEvent(null); setTaskDraft({ date, time }); }}
+              onUpdateEvent={updateEvent}
               onSidebarDrop={handleSidebarDrop}
             />
-          )}
-
-          {view === 'week' && (
-            <WeekView
+          ) : (
+            <MonthGrid
               anchorDate={anchorDate}
-              events={events}
-              onClickEvent={(e) => setEditing(e)}
-              onCreateQuick={(date) => {
-                const start = new Date(date);
-                start.setHours(9, 0, 0, 0);
-                const end = new Date(start);
-                end.setHours(10, 0, 0, 0);
-                setCreating({
-                  title: '',
-                  startISO: start.toISOString(),
-                  endISO: end.toISOString(),
-                  allDay: false,
-                  prefill: '',
-                });
-              }}
-            />
-          )}
-
-          {view === 'month' && (
-            <MonthView
-              anchorDate={anchorDate}
-              events={events}
-              onClickEvent={(e) => setEditing(e)}
-              onCreateQuick={(date) => {
-                const start = new Date(date);
-                start.setHours(9, 0, 0, 0);
-                const end = new Date(start);
-                end.setHours(10, 0, 0, 0);
-                setCreating({
-                  title: '',
-                  startISO: start.toISOString(),
-                  endISO: end.toISOString(),
-                  allDay: false,
-                  prefill: '',
-                });
-              }}
-              onDayClick={(date) => {
-                setAnchorDate(startOfDay(date));
-                setView('day');
-              }}
+              events={expandedMonthEvents}
+              selectedEventId={selectedEvent?.id ?? null}
+              onClickEvent={(event) => setSelectedEvent(event)}
+              onDoubleClickEvent={(event) => { setSelectedEvent(event); setEditing(event); }}
+              onSelectDate={(date) => { setSelectedEvent(null); setAnchorDate(startOfDay(date)); setView('week'); }}
             />
           )}
         </div>
-      </div>
+      </main>
 
-      {(creating || editing) && (
+      {editing && (
         <EventModal
-          initial={creating ?? null}
-          editing={editing}
-          onClose={() => { setCreating(null); setEditing(null); setNlError(null); }}
-          onSaved={handleSaved}
-          onDelete={handleDelete}
-          colors={PRESET_COLORS}
+          event={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => { setEditing(null); await onMutate(); }}
+          onRequestDelete={() => setDeleteCandidate(editing)}
         />
       )}
+      {deleteCandidate && (
+        <DeleteEventModal
+          event={deleteCandidate}
+          onClose={() => setDeleteCandidate(null)}
+          onConfirm={() => { setEditing(null); void deleteEvent(deleteCandidate.id); }}
+        />
+      )}
+      {taskDraft && (
+        <AddTaskModal
+          date={taskDraft.date}
+          time={taskDraft.time}
+          onClose={() => setTaskDraft(null)}
+          onSave={async (title, notes, repeat) => {
+            try {
+              setError(null);
+              await createTaskFromSlot(title, notes, repeat, taskDraft.date, taskDraft.time);
+              setTaskDraft(null);
+            } catch (caught) {
+              setError(caught instanceof Error ? caught.message : 'Could not add task.');
+            }
+          }}
+        />
+      )}
+      {error && <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs text-red-700 shadow-lg dark:border-red-900 dark:bg-zinc-900 dark:text-red-300">{error}</div>}
     </div>
   );
 }
 
-// ─── Sidebar: mini month calendar ─────────────────────────────────────────
-
-const MINI_DOW = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
-function MiniMonthCalendar({
-  selectedDate,
-  onSelectDate,
+function CalendarHeader({
+  view, anchorDate, onNavigate, onToday, onViewChange,
 }: {
-  selectedDate: Date;
-  onSelectDate: (d: Date) => void;
+  view: View;
+  anchorDate: Date;
+  onNavigate: (delta: number) => void;
+  onToday: () => void;
+  onViewChange: (view: View) => void;
 }) {
-  const now = useNow();
-  const today = startOfDay(now);
-
-  // The visible month is independent of the selected day so the user can
-  // page through months without changing the day view. It resyncs to the
-  // selected day's month whenever that day changes.
-  const [visibleMonth, setVisibleMonth] = useState<Date>(() => startOfMonth(selectedDate));
-  // Keep the mini calendar pinned to the selected day's month using
-  // React's "adjust state during render" pattern (no effect needed).
-  const selectedMonthKey = `${selectedDate.getFullYear()}-${selectedDate.getMonth()}`;
-  const [lastSelectedMonthKey, setLastSelectedMonthKey] = useState(selectedMonthKey);
-  if (lastSelectedMonthKey !== selectedMonthKey) {
-    setLastSelectedMonthKey(selectedMonthKey);
-    setVisibleMonth(startOfMonth(selectedDate));
-  }
-
-  // Monday-first grid, always 6 rows for a stable compact shape.
-  const gridStart = startOfWeek(startOfMonth(visibleMonth));
-  const cells: Date[] = [];
-  const cur = new Date(gridStart);
-  for (let i = 0; i < 42; i++) {
-    cells.push(new Date(cur));
-    cur.setDate(cur.getDate() + 1);
-  }
-
   return (
-    <div className="px-3 py-3">
-      <div className="mb-2 flex items-center justify-between gap-1">
-        <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-          {fmtMonthYear(visibleMonth)}
-        </span>
-        <div className="flex shrink-0 items-center gap-0.5">
-          <button
-            type="button"
-            aria-label="Previous month"
-            onClick={() => setVisibleMonth((m) => {
-              const n = new Date(m);
-              n.setMonth(n.getMonth() - 1);
-              return n;
-            })}
-            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            aria-label="Next month"
-            onClick={() => setVisibleMonth((m) => {
-              const n = new Date(m);
-              n.setMonth(n.getMonth() + 1);
-              return n;
-            })}
-            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-            </svg>
-          </button>
-        </div>
+    <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex items-center gap-1">
+        <button type="button" aria-label="Previous" title="Previous" onClick={() => onNavigate(-1)} className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+          <Chevron direction="left" />
+        </button>
+        <button type="button" onClick={onToday} className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">Today</button>
+        <button type="button" aria-label="Next" title="Next" onClick={() => onNavigate(1)} className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+          <Chevron direction="right" />
+        </button>
       </div>
-
-      <div className="mb-1 grid grid-cols-7 text-center">
-        {MINI_DOW.map((w, i) => (
-          <span key={i} className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
-            {w}
-          </span>
-        ))}
+      <h2 className="min-w-0 truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{view === 'week' ? weekLabel(anchorDate) : monthLabel(anchorDate)}</h2>
+      <div className="ml-auto flex rounded-md bg-zinc-100 p-0.5 text-[11px] font-medium dark:bg-zinc-800">
+        {(['week', 'month'] as const).map((option) => <button key={option} type="button" aria-pressed={view === option} onClick={() => onViewChange(option)} className={`rounded px-2.5 py-1 capitalize ${view === option ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100' : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'}`}>{option}</button>)}
       </div>
+    </header>
+  );
+}
 
+function Chevron({ direction }: { direction: 'left' | 'right' }) {
+  return <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={direction === 'left' ? 'M15.75 19.5L8.25 12l7.5-7.5' : 'M8.25 4.5l7.5 7.5-7.5 7.5'} /></svg>;
+}
+
+function MiniMonthCalendar({ selectedDate, onSelectDate }: { selectedDate: Date; onSelectDate: (date: Date) => void }) {
+  const today = startOfDay(new Date());
+  const [visibleMonth, setVisibleMonth] = useState(() => startOfMonth(selectedDate));
+  const firstOffset = (startOfMonth(visibleMonth).getDay() + 6) % 7;
+  const daysInMonth = endOfMonth(visibleMonth).getDate();
+  const cells: Array<Date | null> = [
+    ...Array.from({ length: firstOffset }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => {
+      const date = startOfMonth(visibleMonth);
+      date.setDate(index + 1);
+      return date;
+    }),
+  ];
+  return (
+    <div className="shrink-0 px-3 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{monthLabel(visibleMonth)}</span>
+        <div className="flex gap-0.5"><button type="button" aria-label="Previous month" title="Previous month" onClick={() => setVisibleMonth((date) => { const next = new Date(date); next.setMonth(next.getMonth() - 1); return next; })} className="rounded p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><Chevron direction="left" /></button><button type="button" aria-label="Next month" title="Next month" onClick={() => setVisibleMonth((date) => { const next = new Date(date); next.setMonth(next.getMonth() + 1); return next; })} className="rounded p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><Chevron direction="right" /></button></div>
+      </div>
+      <div className="mb-1 grid grid-cols-7 text-center">{MONTH_WEEKDAYS.map((day, index) => <span key={`${day}-${index}`} className="text-[10px] font-medium text-zinc-400">{day}</span>)}</div>
       <div className="grid grid-cols-7 gap-y-0.5">
-        {cells.map((d, i) => {
-          const isToday = sameDay(d, today);
-          const isSelected = sameDay(d, selectedDate);
-          const inMonth = d.getMonth() === visibleMonth.getMonth();
-          return (
-            <button
-              key={i}
-              type="button"
-              onClick={() => onSelectDate(d)}
-              aria-label={fmtLongDate(d)}
-              className={`mx-auto flex h-7 w-7 items-center justify-center rounded-full text-[11px] tabular-nums transition-colors ${
-                isSelected
-                  ? 'bg-zinc-900 font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900'
-                  : isToday
-                  ? 'font-bold text-rose-600 ring-1 ring-inset ring-rose-400/60 dark:text-rose-400 dark:ring-rose-400/50'
-                  : inMonth
-                  ? 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800'
-                  : 'text-zinc-300 hover:bg-zinc-100 dark:text-zinc-600 dark:hover:bg-zinc-800'
-              }`}
-            >
-              {d.getDate()}
-            </button>
-          );
-        })}
+        {cells.map((date, index) => date ? <button key={ymd(date)} type="button" onClick={() => onSelectDate(date)} aria-label={date.toLocaleDateString('en-US', { dateStyle: 'full' })} className={`mx-auto flex h-7 w-7 items-center justify-center rounded-full text-[11px] tabular-nums ${sameDay(date, selectedDate) ? 'bg-zinc-900 font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900' : sameDay(date, today) ? 'font-bold text-rose-600 ring-1 ring-rose-400/60 dark:text-rose-400' : 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800'}`}>{date.getDate()}</button> : <span key={`blank-${index}`} className="h-7" />)}
       </div>
-
-      <button
-        type="button"
-        onClick={() => {
-          setVisibleMonth(startOfMonth(new Date()));
-          onSelectDate(startOfDay(new Date()));
-        }}
-        className="mt-2 w-full rounded-md border border-zinc-200 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-      >
-        Today
-      </button>
     </div>
   );
 }
 
-// ─── Sidebar: Today / Upcoming list ───────────────────────────────────────
-
-function ymd(d: Date): string {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
-function fmtRelativeDay(dateStr: string): string {
-  const d = new Date(`${dateStr}T00:00:00`);
-  const diff = Math.round((startOfDay(d).getTime() - startOfDay(new Date()).getTime()) / 86400000);
-  if (diff <= 0) return 'Today';
-  if (diff === 1) return 'Tomorrow';
-  if (diff < 7) return d.toLocaleDateString('en-US', { weekday: 'short' });
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function TodayUpcoming({
-  events, habits, completions, tasks, onSelectDate, onSidebarDrop,
-}: {
+function CalendarSidebar({ events, habits, completions, tasks, onSelectDate }: {
   events: CalendarEvent[];
   habits: HabitSummary[];
   completions: Set<string>;
   tasks: Task[];
-  onSelectDate: (d: Date) => void;
-  onSidebarDrop?: (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => void;
+  onSelectDate: (date: Date) => void;
 }) {
-  const now = new Date();
-  const todayKey = ymd(now);
-
-  // Incomplete habits = not yet completed today.
-  const incompleteHabits = habits.filter((h) => !completions.has(h.id));
-  const todayTodos = tasks
-    .filter((t) => t.status === 'pending' && t.scheduled_for === todayKey)
-    .slice(0, 6);
-
-  // Upcoming events (next 14 days) with recurring rules expanded so the
-  // next occurrence shows on the correct date.
-  const horizonEnd = new Date(now);
-  horizonEnd.setDate(horizonEnd.getDate() + 14);
-  const upcomingEvents = expandAllForRange(events, startOfDay(now), horizonEnd)
-    .filter((e) => new Date(e.end_at).getTime() >= now.getTime())
-    .sort((a, b) => a.start_at.localeCompare(b.start_at))
-    .slice(0, 6);
-
-  const futureTodos = tasks
-    .filter(
-      (t): t is Task & { scheduled_for: string } =>
-        t.status === 'pending' && t.scheduled_for != null && t.scheduled_for > todayKey,
-    )
-    .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
-    .slice(0, 6);
-
-  // Unscheduled items: habits (all incomplete) + tasks with no date
-  const unscheduledTasks = tasks
-    .filter((t) => t.status === 'pending' && !t.scheduled_for)
-    .slice(0, 6);
-  const hasUnscheduled = incompleteHabits.length > 0 || unscheduledTasks.length > 0;
-
+  const today = startOfDay(new Date());
+  const todayKey = ymd(today);
+  const incompleteHabits = habits.filter((habit) => !completions.has(habit.id));
+  const todayTasks = tasks.filter((task) => task.status === 'pending' && task.scheduled_for === todayKey);
+  const upcoming = events.filter((event) => new Date(event.end_at) >= new Date()).sort((a, b) => a.start_at.localeCompare(b.start_at)).slice(0, 8);
+  const unscheduledTasks = tasks.filter((task) => task.status === 'pending' && !task.scheduled_for).slice(0, 8);
+  const items = [
+    ...incompleteHabits.map((habit) => ({ type: 'habit' as const, id: habit.id, title: habit.name, color: 'bg-emerald-400' })),
+    ...unscheduledTasks.map((task) => ({ type: 'task' as const, id: task.id, title: task.title, color: 'bg-sky-400' })),
+  ];
   return (
-    <div className="space-y-3 px-3 py-3">
-      <section>
-        <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-          Today
-        </h4>
-        <ul className="space-y-1">
-          {incompleteHabits.length === 0 && todayTodos.length === 0 ? (
-            <li className="text-[11px] italic text-zinc-400 dark:text-zinc-600">Nothing left today</li>
-          ) : (
-            <>
-              {incompleteHabits.slice(0, 6).map((h) => (
-                <li key={`h-${h.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
-                  <span aria-hidden className="h-3 w-3 shrink-0 rounded-full border-2 border-zinc-300 dark:border-zinc-600" />
-                  <span className="truncate">{h.name}</span>
-                  {h.duration_minutes != null && (
-                    <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                      {h.duration_minutes}m
-                    </span>
-                  )}
-                </li>
-              ))}
-              {todayTodos.map((t) => (
-                <li key={`t-${t.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
-                  <span aria-hidden className="h-3 w-3 shrink-0 rounded border-2 border-zinc-300 dark:border-zinc-600" />
-                  <span className="truncate">{t.title}</span>
-                  {t.duration_minutes != null && (
-                    <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                      {t.duration_minutes}m
-                    </span>
-                  )}
-                </li>
-              ))}
-            </>
-          )}
-        </ul>
-      </section>
-
-      <section>
-        <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-          Upcoming
-        </h4>
-        <ul className="space-y-1">
-          {upcomingEvents.length === 0 && futureTodos.length === 0 ? (
-            <li className="text-[11px] italic text-zinc-400 dark:text-zinc-600">Nothing upcoming</li>
-          ) : (
-            <>
-              {upcomingEvents.map((e) => {
-                const colors = PRESET_COLORS.find((c) => c.name === e.color);
-                const dotCls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-600';
-                return (
-                  <li key={e.sid}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectDate(new Date(e.start_at))}
-                      className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                    >
-                      <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${dotCls}`} />
-                      {e.all_day ? (
-                        <span className="truncate">{e.title}</span>
-                      ) : (
-                        <>
-                          <span className="shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                            {fmtHM(new Date(e.start_at))}
-                          </span>
-                          <span className="truncate">{e.title}</span>
-                        </>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-              {futureTodos.map((t) => (
-                <li key={`ft-${t.id}`} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
-                  <span className="shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                    {fmtRelativeDay(t.scheduled_for)}
-                  </span>
-                  <span aria-hidden className="h-3 w-3 shrink-0 rounded border-2 border-zinc-300 dark:border-zinc-600" />
-                  <span className="truncate">{t.title}</span>
-                </li>
-              ))}
-            </>
-          )}
-        </ul>
-      </section>
-
-      {/* Unscheduled — draggable habits + tasks for the calendar */}
-      {hasUnscheduled && (
-        <section>
-          <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-            Unscheduled — drag to calendar
-          </h4>
-          <ul className="space-y-0.5">
-            {incompleteHabits.map((h) => (
-              <li
-                key={`uh-${h.id}`}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('application/x-sidebar-item', JSON.stringify({ type: 'habit', id: h.id }));
-                  e.dataTransfer.effectAllowed = 'copy';
-                }}
-                className="flex cursor-grab items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 active:cursor-grabbing dark:text-zinc-300 dark:hover:bg-zinc-800"
-                title={`Drag ${h.name} onto the calendar to schedule it`}
-              >
-                <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 dark:bg-emerald-500" />
-                <span className="truncate font-medium">{h.name}</span>
-                {h.duration_minutes != null && (
-                  <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                    {h.duration_minutes}m
-                  </span>
-                )}
-                <svg className="h-2.5 w-2.5 shrink-0 text-zinc-300 dark:text-zinc-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-                </svg>
-              </li>
-            ))}
-            {unscheduledTasks.map((t) => (
-              <li
-                key={`ut-${t.id}`}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('application/x-sidebar-item', JSON.stringify({ type: 'task', id: t.id }));
-                  e.dataTransfer.effectAllowed = 'copy';
-                }}
-                className="flex cursor-grab items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 active:cursor-grabbing dark:text-zinc-300 dark:hover:bg-zinc-800"
-                title={`Drag ${t.title} onto the calendar to schedule it`}
-              >
-                <span aria-hidden className="h-2 w-2 shrink-0 rounded bg-sky-400 dark:bg-sky-500" />
-                <span className="truncate font-medium">{t.title}</span>
-                {t.duration_minutes != null && (
-                  <span className="ml-auto shrink-0 tabular-nums text-zinc-400 dark:text-zinc-500">
-                    {t.duration_minutes}m
-                  </span>
-                )}
-                <svg className="h-2.5 w-2.5 shrink-0 text-zinc-300 dark:text-zinc-600" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-                </svg>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+    <div className="space-y-4 px-3 py-3">
+      <SidebarSection title="Today">
+        {todayTasks.length === 0 && incompleteHabits.length === 0 ? <EmptySidebar text="Nothing left today" /> : <div className="grid grid-cols-2 gap-x-2 gap-y-1">{[
+          ...incompleteHabits.slice(0, 8).map((habit) => <DraggableSidebarItem key={`habit-${habit.id}`} type="habit" id={habit.id} title={habit.name} color="bg-emerald-400" />),
+          ...todayTasks.slice(0, 8).map((task) => <DraggableSidebarItem key={`task-${task.id}`} type="task" id={task.id} title={task.title} color="bg-sky-400" />),
+        ]}</div>}
+      </SidebarSection>
+      <SidebarSection title="Upcoming">
+        {upcoming.length === 0 ? <EmptySidebar text="Nothing upcoming" /> : <div className="grid grid-cols-2 gap-x-2 gap-y-1">{upcoming.map((event) => <button key={`${event.id}-${event.start_at}`} type="button" onClick={() => onSelectDate(new Date(event.start_at))} className="flex min-w-0 items-start gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-zinc-400" /><span className="min-w-0 break-words leading-tight"><span className="mr-1 text-zinc-400">{shortTime(new Date(event.start_at))}</span>{event.title}</span></button>)}</div>}
+      </SidebarSection>
+      {items.length > 0 && <SidebarSection title="Unscheduled - drag to calendar"><div className="grid grid-cols-2 gap-1.5">{items.map((item) => <DraggableSidebarItem key={`${item.type}-${item.id}`} type={item.type} id={item.id} title={item.title} color={item.color} />)}</div></SidebarSection>}
     </div>
   );
 }
 
-// ─── Header ───────────────────────────────────────────────────────────────
-
-function CalendarHeader({
-  view, setView, anchorDate, goToday, navigate, onAdd,
-  nlDraft, setNlDraft, onNLSubmit, nlError,
-}: {
-  view: View; setView: (v: View) => void;
-  anchorDate: Date; goToday: () => void;
-  navigate: (delta: number, unit: 'day' | 'week' | 'month') => void;
-  onAdd: () => void;
-  nlDraft: string; setNlDraft: (s: string) => void;
-  onNLSubmit: () => void; nlError: string | null;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          aria-label="Previous"
-          onClick={() => navigate(-1, view === 'day' ? 'day' : view === 'week' ? 'week' : 'month')}
-          className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-        >
-          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          onClick={goToday}
-          className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
-        >
-          Today
-        </button>
-        <button
-          type="button"
-          aria-label="Next"
-          onClick={() => navigate(1, view === 'day' ? 'day' : view === 'week' ? 'week' : 'month')}
-          className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-        >
-          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-          </svg>
-        </button>
-      </div>
-
-      <h2 className="ml-1 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-        {view === 'day'
-          ? fmtLongDate(anchorDate)
-          : view === 'week'
-          ? fmtWeekRange(startOfWeek(anchorDate))
-          : fmtMonthYear(anchorDate)}
-      </h2>
-
-      <div className="rounded-md bg-zinc-100 p-0.5 text-[11px] font-medium dark:bg-zinc-800">
-        {(['day', 'week', 'month'] as const).map((v) => (
-          <button
-            key={v}
-            type="button"
-            aria-pressed={view === v}
-            onClick={() => setView(v)}
-            className={`rounded px-2 py-0.5 transition-colors duration-150 ${
-              view === v
-                ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-900 dark:text-zinc-100'
-                : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200'
-            }`}
-          >
-            {v === 'day' ? 'Day' : v === 'week' ? 'Week' : 'Month'}
-          </button>
-        ))}
-      </div>
-
-      <div className="ml-auto flex items-center gap-1.5">
-        <form
-          onSubmit={(e) => { e.preventDefault(); onNLSubmit(); }}
-          className="hidden items-center gap-1 lg:flex"
-        >
-          <div className="flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-800">
-            <span aria-hidden className="text-[11px] text-zinc-400">✨</span>
-            <input
-              type="text"
-              placeholder='Try "Tennis Tuesday at 6"'
-              value={nlDraft}
-              onChange={(e) => setNlDraft(e.target.value)}
-              className="w-52 bg-transparent text-xs text-zinc-900 placeholder-zinc-400 outline-none dark:text-zinc-100"
-            />
-          </div>
-        </form>
-
-        <VoiceButton onTranscript={(t) => setNlDraft(t)} />
-
-        <button
-          type="button"
-          onClick={onAdd}
-          className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-        >
-          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          Add
-        </button>
-      </div>
-
-      {nlError && (
-        <div className="basis-full text-[11px] text-amber-600 dark:text-amber-400">
-          {nlError}
-        </div>
-      )}
-    </div>
-  );
+function SidebarSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return <section><h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">{title}</h3>{children}</section>;
 }
 
-// ─── Day view ──────────────────────────────────────────────────────────────
+function DraggableSidebarItem({ type, id, title, color }: { type: 'habit' | 'task'; id: string; title: string; color: string }) {
+  return <div
+    draggable
+    onDragStart={(event) => {
+      event.dataTransfer.setData('application/x-sidebar-item', JSON.stringify({ type, id }));
+      event.dataTransfer.effectAllowed = 'copy';
+      event.currentTarget.classList.add('opacity-50', 'ring-1', 'ring-rose-400');
+    }}
+    onDragEnd={(event) => event.currentTarget.classList.remove('opacity-50', 'ring-1', 'ring-rose-400')}
+    className="flex min-w-0 cursor-grab items-start gap-1.5 rounded px-1 py-1 text-[11px] text-zinc-600 transition active:cursor-grabbing dark:text-zinc-300"
+    title={`Drag ${title} onto the calendar`}
+  >
+    <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${color}`} />
+    <span className="min-w-0 break-words leading-tight">{title}</span>
+  </div>;
+}
 
-function DayView({
-  anchorDate,
-  allDayEvents,
-  timedEvents,
-  onCreateRange,
-  onUpdateEvent,
-  onClickEvent,
-  onSidebarDrop,
-}: {
+function EmptySidebar({ text }: { text: string }) {
+  return <p className="text-[11px] italic text-zinc-400 dark:text-zinc-600">{text}</p>;
+}
+
+function WeekTimeline({ anchorDate, events, selectedEventId, onClickEvent, onDoubleClickEvent, onCreateSlot, onUpdateEvent, onSidebarDrop }: {
   anchorDate: Date;
-  allDayEvents: ExpandedEvent[];
-  timedEvents: ExpandedEvent[];
-  onCreateRange: (startISO: string, endISO: string) => void;
-  onUpdateEvent: (id: string, iso: { start_at: string; end_at: string }) => Promise<void>;
-  onClickEvent: (e: ExpandedEvent) => void;
-  onSidebarDrop?: (itemType: 'habit' | 'task', itemId: string, dateStr: string, timeStr: string) => void;
+  events: ExpandedEvent[];
+  selectedEventId: string | null;
+  onClickEvent: (event: ExpandedEvent) => void;
+  onDoubleClickEvent: (event: ExpandedEvent) => void;
+  onCreateSlot: (date: string, time: string) => void;
+  onUpdateEvent: (id: string, start: string, end: string) => Promise<void>;
+  onSidebarDrop: (type: 'habit' | 'task', id: string, date: string, time: string) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{
-    type: 'create' | 'move' | 'resize' | null;
-    originY: number;
-    startMin: number;
-    endMin: number;
-    eventId?: string;
-  }>({ type: null, originY: 0, startMin: 0, endMin: 0 });
-  const [draftRange, setDraftRange] = useState<null | { top: number; height: number }>(null);
-  const [dragPreview, setDragPreview] = useState<null | { id: string; top: number; height: number }>(null);
-  const [sidebarDragOver, setSidebarDragOver] = useState(false);
-  const [sidebarDropMin, setSidebarDropMin] = useState<number | null>(null);
-
-  const now = useNow();
-  const isToday = sameDay(now, anchorDate);
-
-  // Auto-scroll to roughly the current time on first mount (Today)
-  useEffect(() => {
-    if (!containerRef.current) return;
-    if (!isToday) return;
-    const min = minutesFromFloor(now);
-    const target = Math.max(0, min * PX_PER_MIN - 120);
-    containerRef.current.scrollTop = target;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function pointerToMinutes(clientY: number): number {
-    const rect = containerRef.current!.getBoundingClientRect();
-    const y = clientY - rect.top + containerRef.current!.scrollTop;
-    return clampMinutes(snapMinutes(y / PX_PER_MIN));
-  }
-
-  const onPointerDownGrid = useCallback(
-    (e: React.PointerEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.closest('[data-event]') || target.closest('[data-handle]')) return;
-      // Only react to primary button
-      if (e.button !== 0) return;
-      e.preventDefault();
-      const min = pointerToMinutes(e.clientY);
-      dragRef.current = {
-        type: 'create',
-        originY: e.clientY,
-        startMin: min,
-        endMin: min + 30,
-      };
-      setDraftRange({ top: min * PX_PER_MIN, height: 30 * PX_PER_MIN });
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    },
-    [],
-  );
-
-  const onPointerDownEvent = useCallback(
-    (e: React.PointerEvent, ev: CalendarEvent, mode: 'move' | 'resize') => {
-      if (e.button !== 0) return;
-      e.stopPropagation();
-      e.preventDefault();
-      const min = pointerToMinutes(e.clientY);
-      const startMin = minutesFromFloor(new Date(ev.start_at));
-      const endMin = Math.max(startMin + 15, minutesFromFloor(new Date(ev.end_at)));
-      dragRef.current = {
-        type: mode,
-        originY: e.clientY,
-        startMin,
-        endMin,
-        eventId: ev.id,
-      };
-      setDragPreview({
-        id: ev.id,
-        top: startMin * PX_PER_MIN,
-        height: (endMin - startMin) * PX_PER_MIN,
-      });
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    },
-    [],
-  );
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d.type) return;
-    const min = pointerToMinutes(e.clientY);
-    if (d.type === 'create') {
-      const start = Math.min(d.startMin, min);
-      const end = Math.max(d.startMin, min);
-      setDraftRange({ top: start * PX_PER_MIN, height: (end - start) * PX_PER_MIN });
-    } else if (d.type === 'move' && d.eventId) {
-      const deltaMin = min - d.startMin;
-      const newStart = Math.max(0, d.startMin + deltaMin);
-      const newEnd = Math.min((HOUR_CEIL - HOUR_FLOOR) * 60, d.endMin + deltaMin);
-      const height = (d.endMin - d.startMin) * PX_PER_MIN;
-      setDragPreview({ id: d.eventId, top: newStart * PX_PER_MIN, height });
-    } else if (d.type === 'resize' && d.eventId) {
-      const newEnd = Math.max(d.startMin + 15, min);
-      const height = (newEnd - d.startMin) * PX_PER_MIN;
-      setDragPreview({ id: d.eventId, top: d.startMin * PX_PER_MIN, height });
-    }
-  }, []);
-
-  const onPointerUpGrid = useCallback(
-    async (e: React.PointerEvent) => {
-      const d = dragRef.current;
-      if (!d.type) return;
-      (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-
-      if (d.type === 'create') {
-        const startMin = Math.min(d.startMin, d.endMin - d.startMin < 15 ? d.startMin + 30 : (dragRef.current as any).endMin || d.startMin + 30);
-        // Recompute properly from draftRange height
-        // The draftRange state already shows the truth; trust its values via DOM:
-        const el = containerRef.current!.querySelector('[data-draft]') as HTMLElement | null;
-        let startM = d.startMin;
-        let endM = d.endMin;
-        if (el) {
-          const top = parseFloat(el.style.top);
-          const height = parseFloat(el.style.height);
-          startM = snapMinutes(top / PX_PER_MIN);
-          endM = snapMinutes((top + height) / PX_PER_MIN);
-          if (endM < startM + 15) endM = startM + 30;
-        }
-        const startHM = minutesToHM(Math.max(0, startM));
-        const endHM = minutesToHM(clampMinutes(endM));
-        const baseDay = startOfDay(anchorDate);
-        const start = new Date(baseDay); start.setHours(startHM.h, startHM.m, 0, 0);
-        const end = new Date(baseDay); end.setHours(endHM.h, endHM.m, 0, 0);
-        dragRef.current = { type: null, originY: 0, startMin: 0, endMin: 0 };
-        setDraftRange(null);
-        onCreateRange(start.toISOString(), end.toISOString());
-        return;
-      }
-
-      if ((d.type === 'move' || d.type === 'resize') && d.eventId) {
-        const el = containerRef.current!.querySelector(
-          `[data-event="${d.eventId}"]`,
-        ) as HTMLElement | null;
-        let startM = d.startMin;
-        let endM = d.endMin;
-        if (el) {
-          const top = parseFloat(el.style.top);
-          const height = parseFloat(el.style.height);
-          startM = snapMinutes(top / PX_PER_MIN);
-          endM = snapMinutes((top + height) / PX_PER_MIN);
-        }
-        if (endM < startM + 15) endM = startM + 30;
-        const startHM = minutesToHM(Math.max(0, startM));
-        const endHM = minutesToHM(clampMinutes(endM));
-        const baseDay = startOfDay(anchorDate);
-        const start = new Date(baseDay); start.setHours(startHM.h, startHM.m, 0, 0);
-        const end = new Date(baseDay); end.setHours(endHM.h, endHM.m, 0, 0);
-        dragRef.current = { type: null, originY: 0, startMin: 0, endMin: 0 };
-        const eventId = d.eventId;
-        const mode = d.type;
-        setDragPreview(null);
-        await onUpdateEvent(eventId, { start_at: start.toISOString(), end_at: end.toISOString() });
-        return;
-      }
-      dragRef.current = { type: null, originY: 0, startMin: 0, endMin: 0 };
-      setDraftRange(null);
-      setDragPreview(null);
-    },
-    [anchorDate, onCreateRange, onUpdateEvent],
-  );
-
-  // ─── Sidebar drag-and-drop handlers ───────────────────────────────────
-  const onSidebarDragOver = useCallback((e: React.DragEvent) => {
-    // Only accept sidebar item drags
-    const types = Array.from(e.dataTransfer.types);
-    if (!types.includes('application/x-sidebar-item')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    setSidebarDragOver(true);
-
-    // Calculate which minute slot the cursor is over
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const y = e.clientY - rect.top + containerRef.current.scrollTop;
-      const min = clampMinutes(snapMinutes(y / PX_PER_MIN));
-      setSidebarDropMin(min);
-    }
-  }, []);
-
-  const onSidebarDragLeave = useCallback((e: React.DragEvent) => {
-    // Only clear if leaving the container (not entering a child)
-    const related = e.relatedTarget as HTMLElement | null;
-    if (containerRef.current && related && containerRef.current.contains(related)) return;
-    setSidebarDragOver(false);
-    setSidebarDropMin(null);
-  }, []);
-
-  const onSidebarDropHandler = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setSidebarDragOver(false);
-    setSidebarDropMin(null);
-
-    const raw = e.dataTransfer.getData('application/x-sidebar-item');
-    if (!raw || !onSidebarDrop || !containerRef.current) return;
-
-    try {
-      const { type, id } = JSON.parse(raw) as { type: 'habit' | 'task'; id: string };
-      const rect = containerRef.current.getBoundingClientRect();
-      const y = e.clientY - rect.top + containerRef.current.scrollTop;
-      const min = clampMinutes(snapMinutes(y / PX_PER_MIN));
-      const hm = minutesToHM(min);
-      const dateStr = ymd(anchorDate);
-      const timeStr = `${pad2(hm.h)}:${pad2(hm.m)}`;
-      onSidebarDrop(type, id, dateStr, timeStr);
-    } catch { /* invalid payload */ }
-  }, [anchorDate, onSidebarDrop]);
-
-  // Expand recurring events into virtual occurrences for THIS day.
-  // Non-recurring events pass through unchanged. Recurring events get
-  // virtual rows that render exactly like real ones in the day view.
-  const viewStart = startOfDay(anchorDate);
-  const viewEnd = new Date(viewStart);
-  viewEnd.setHours(23, 59, 59, 999);
-  const expandedTimed = useMemo(
-    () =>
-      expandAllForRange(timedEvents, viewStart, viewEnd).filter((e) => {
-        // Day view shows events whose start lands on this anchorDate OR
-        // spans across it (multi-day timed events).
-        const s = new Date(e.start_at);
-        const en = new Date(e.end_at);
-        return sameDay(s, anchorDate) || (s < viewStart && en > viewStart);
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timedEvents, anchorDate],
-  );
-  // Compute side-by-side overlap layout once per render.
-  const overlapLayout = useMemo(
-    () => layoutOverlappingEvents(expandedTimed),
-    [expandedTimed],
-  );
-
-  // Free-time chips: gaps ≥ 30 min between timed events today.
-  // Includes virtual expanded occurrences so the free-time hint
-  // reflects what the user actually sees.
-  const freeChips = useMemo(() => {
-    if (!isToday) return [];
-    const nowMin = minutesFromFloor(now);
-    const sorted = expandedTimed
-      .map((e) => ({
-        s: minutesFromFloor(new Date(e.start_at)),
-        en: minutesFromFloor(new Date(e.end_at)),
-      }))
-      .sort((a, b) => a.s - b.s);
-    const gaps: { start: number; end: number }[] = [];
-    let cursor = 0;
-    for (const seg of sorted) {
-      if (seg.s > cursor) gaps.push({ start: cursor, end: seg.s });
-      cursor = Math.max(cursor, seg.en);
-    }
-    if (cursor < TOTAL_HOURS * 60) gaps.push({ start: cursor, end: TOTAL_HOURS * 60 });
-    return gaps
-      .filter((g) => g.end - g.start >= 60 && g.end > nowMin + 60) // future free time ≥ 1h
-      .slice(0, 3); // top 3 — keeps the panel quiet
-  }, [expandedTimed, now, isToday]);
-
-  const liveMin = minutesFromFloor(now);
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* All-day strip */}
-      <div className="flex items-start gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-        <span className="mt-1 text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-          All-day
-        </span>
-        <div className="flex flex-1 flex-wrap gap-1.5">
-          {allDayEvents.length === 0 ? (
-            <span className="text-[11px] italic text-zinc-400 dark:text-zinc-500">No all-day events</span>
-          ) : (
-            allDayEvents.map((e) => (
-              <AllDayChip key={e.id} event={e} onClick={() => onClickEvent(e)} />
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* Timeline */}
-      <div
-        ref={containerRef}
-        onPointerDown={onPointerDownGrid}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUpGrid}
-        onPointerCancel={onPointerUpGrid}
-        onDragOver={onSidebarDragOver}
-        onDragLeave={onSidebarDragLeave}
-        onDrop={onSidebarDropHandler}
-        className={`relative flex-1 select-none overscroll-contain ${
-          sidebarDragOver ? 'cursor-copy' : 'cursor-crosshair'
-        } overflow-y-visible md:overflow-y-auto`
-        }
-        // touch-action=pan-y lets mobile users scroll the timeline
-        // vertically with their thumb while still letting pointer events
-        // drive our drag-to-create + drag-to-move/resize handlers.
-        // (Full `none` would freeze mobile scroll inside the day view.)
-        style={{ touchAction: 'pan-y' }}
-      >
-        <div className="relative" style={{ height: TIMELINE_HEIGHT_PX, paddingRight: 8 }}>
-          {/* Hour markers */}
-          {Array.from({ length: TOTAL_HOURS + 1 }, (_, i) => HOUR_FLOOR + i).map((h, i) => (
-            <div
-              key={h}
-              className="pointer-events-none absolute left-0 right-0 border-t border-zinc-100 dark:border-zinc-800"
-              style={{ top: i * PX_PER_HOUR }}
-            >
-              <span className="-translate-y-1.5 inline-block pl-2 text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
-                {pad2(h)}:00
-              </span>
-            </div>
-          ))}
-
-          {/* Free time chips */}
-          {freeChips.map((g, i) => (
-            <div
-              key={i}
-              className="pointer-events-none absolute left-12 right-2 rounded-md border border-dashed border-emerald-200/70 bg-emerald-50/40 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:border-emerald-700/40 dark:bg-emerald-900/20 dark:text-emerald-300"
-              style={{ top: g.start * PX_PER_MIN, height: (g.end - g.start) * PX_PER_MIN }}
-            >
-              <span className="opacity-70">✨ Available · {Math.floor((g.end - g.start) / 60)}h {(g.end - g.start) % 60}m</span>
-            </div>
-          ))}
-
-          {/* Events — drawn expanded for recurrence; side-by-side for
-              overlaps inside the same cluster. Virtual occurrences get
-              an `aria-virtual` toggle so a11y tools can tell them apart
-              from the real recurring-rule row. */}
-          {expandedTimed.map((e) => {
-            const startMin = Math.max(0, minutesFromFloor(new Date(e.start_at)));
-            const endMin = clampMinutes(minutesFromFloor(new Date(e.end_at)));
-            const height = Math.max(20, (endMin - startMin) * PX_PER_MIN);
-            const preview = dragPreview && dragPreview.id === e.id ? dragPreview : null;
-            const top = preview ? preview.top : startMin * PX_PER_MIN;
-            const finalHeight = preview ? preview.height : height;
-
-            const overlap = overlapLayout.get(e.sid);
-            const cols = overlap?.cols ?? 1;
-            const colon = cols > 0 ? 100 / cols : 100;
-            const usable = 100 - GUTTER_PCT;
-            const leftPct = GUTTER_PCT + (overlap?.col ?? 0) * colon;
-            const widthPct = colon;
-
-            return (
-              <DraggableEventBlock
-                key={e.sid}
-                event={e}
-                top={top}
-                height={finalHeight}
-                overlapCols={cols}
-                leftPct={leftPct}
-                widthPct={widthPct}
-                onClick={() => onClickEvent(e)}
-                onPointerDown={(ev, mode) => onPointerDownEvent(ev, e, mode)}
-              />
-            );
-          })}
-
-          {/* Draft event preview while drag-creating */}
-          {draftRange && (
-            <div
-              data-draft
-              className="pointer-events-none absolute left-12 right-2 rounded-md border border-dashed border-rose-400 bg-rose-100/40 px-2 py-1 text-[11px] font-medium text-rose-700 dark:border-rose-500 dark:bg-rose-900/30 dark:text-rose-200"
-              style={{ top: draftRange.top, height: draftRange.height }}
-            >
-              <span className="opacity-80">New commitment</span>
-            </div>
-          )}
-
-          {/* Sidebar drag-drop indicator */}
-          {sidebarDragOver && sidebarDropMin != null && (
-            <div
-              className="pointer-events-none absolute left-12 right-2 rounded-md border-2 border-dashed border-emerald-400 bg-emerald-100/50 px-2 py-1 text-[11px] font-medium text-emerald-700 dark:border-emerald-500 dark:bg-emerald-900/30 dark:text-emerald-200"
-              style={{
-                top: sidebarDropMin * PX_PER_MIN,
-                height: 30 * PX_PER_MIN,
-              }}
-            >
-              <span className="opacity-80">Drop to schedule</span>
-            </div>
-          )}
-
-          {/* Live current-time indicator */}
-          {isToday && liveMin >= 0 && liveMin <= TOTAL_HOURS * 60 && (
-            <div
-              className="pointer-events-none absolute left-0 right-0 flex items-center gap-2"
-              style={{ top: liveMin * PX_PER_MIN }}
-            >
-              <span className="h-2 w-2 rounded-full bg-rose-500 shadow-[0_0_0_4px_rgba(244,63,94,0.18)]" />
-              <span className="h-px flex-1 bg-gradient-to-r from-rose-500/80 via-rose-500/40 to-rose-500/0" />
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Draggable event block ─────────────────────────────────────────────────
-
-function DraggableEventBlock({
-  event, top, height, onClick, onPointerDown,
-  overlapCols, leftPct, widthPct,
-}: {
-  event: ExpandedEvent;
-  top: number;
-  height: number;
-  onClick: () => void;
-  onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize') => void;
-  /**
-   * Total columns in the overlap cluster. When 1 (i.e. no overlap),
-   * the block fills the full timeline minus the 14 % hour-gutter.
-   * Higher values mean more sibling events on the same row, so we
-   * shrink to (1 / cols) of the available width.
-   */
-  overlapCols: number;
-  /** Inline `left` in percent of the timeline gutter-relative origin. */
-  leftPct: number;
-  /** Inline `width` in percent of the timeline gutter-relative origin. */
-  widthPct: number;
-}) {
-  const colors = PRESET_COLORS.find((c) => c.name === event.color);
-  const cls = colors?.cls ?? 'bg-zinc-400 dark:bg-zinc-600';
-  const isDark = !event.color;
-  return (
-    <div
-      data-event={event.id}
-      data-virtual={event.isVirtual ? '1' : '0'}
-      onClick={(e) => { e.stopPropagation(); onClick(); }}
-      onPointerDown={(e) => onPointerDown(e, 'move')}
-      aria-label={event.isVirtual ? `Recurring: ${event.title}` : event.title}
-      className={`group absolute cursor-grab overflow-hidden rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
-        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      } ${height < 28 ? 'leading-tight' : ''} ${
-        event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''
-      }`}
-      style={{ top, height, left: `${leftPct}%`, width: `${widthPct}%` }}
-    >
-      <div className="flex items-center gap-1">
-        {event.isVirtual && (
-          <svg
-            aria-hidden
-            className="h-2.5 w-2.5 shrink-0 opacity-70"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={2.5}
-            stroke="currentColor"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-          </svg>
-        )}
-        <span className="truncate leading-tight">{event.title}</span>
-      </div>
-      {height >= 28 && (
-        <div className="truncate text-[10px] opacity-85">
-          {fmtHM(new Date(event.start_at))} – {fmtHM(new Date(event.end_at))}
-        </div>
-      )}
-      {/* Resize handle — bottom 6px. Only "real" non-virtual events are
-          editable on the day view; virtual recurring occurrences write
-          back to the underlying real row. */}
-      <div
-        data-handle="resize"
-        onPointerDown={(e) => { e.stopPropagation(); onPointerDown(e, 'resize'); }}
-        className="absolute inset-x-0 bottom-0 h-2 cursor-ns-resize bg-black/0 hover:bg-black/10"
-        aria-label="Resize"
-      />
-    </div>
-  );
-}
-
-// ─── All-day chip ──────────────────────────────────────────────────────────
-
-function AllDayChip({ event, onClick }: { event: ExpandedEvent; onClick: () => void }) {
-  const colors = PRESET_COLORS.find((c) => c.name === event.color);
-  const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
-  const isDark = !event.color;
-  const s = new Date(event.start_at);
-  const en = new Date(event.end_at);
-  const sameStartEndDay = sameDay(s, en);
-  const label = sameStartEndDay
-    ? s.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : `${s.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${en.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`group inline-flex items-center gap-1.5 rounded-md ${cls} px-2 py-1 text-[11px] font-medium shadow-sm transition-shadow hover:shadow ${
-        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      } ${event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
-    >
-      {event.isVirtual && (
-        <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-        </svg>
-      )}
-      <span className="truncate">{event.title}</span>
-      <span className="text-[10px] opacity-80">{label}</span>
-    </button>
-  );
-}
-
-// ─── Week view ─────────────────────────────────────────────────────────────
-
-function WeekView({
-  anchorDate, events, onClickEvent, onCreateQuick,
-}: {
-  anchorDate: Date;
-  events: CalendarEvent[];
-  onClickEvent: (e: ExpandedEvent) => void;
-  onCreateQuick: (date: Date) => void;
-}) {
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ type: 'create' | 'move' | 'resize-top' | 'resize-bottom'; id?: string; sid?: string; dayIndex: number; start: number; end: number; origin: number }>({ type: 'create', dayIndex: 0, start: 0, end: 30, origin: 0 });
+  const previewRef = useRef<{ sid: string; dayIndex: number; start: number; end: number } | null>(null);
+  const suppressClickRef = useRef(false);
+  const [preview, setPreview] = useState<{ sid: string; dayIndex: number; start: number; end: number } | null>(null);
+  const [draggingSidebar, setDraggingSidebar] = useState(false);
   const monday = startOfWeek(anchorDate);
-  const sunday = new Date(monday);
-  sunday.setDate(sunday.getDate() + 6);
-  sunday.setHours(23, 59, 59, 999);
-  const days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday);
-    d.setDate(d.getDate() + i);
-    return d;
-  });
-  const now = useNow();
-  const today = startOfDay(now);
+  const days = Array.from({ length: 7 }, (_, index) => addDays(monday, index));
+  const allDayEvents = events.filter((event) => event.all_day);
+  const timedEvents = events.filter((event) => !event.all_day && days.some((day) => sameDay(new Date(event.start_at), day)));
 
-  // Expand recurring events across the full week view so a daily/weekly
-  // habit shows correctly on each weekday's column.
-  const expandedEvents = useMemo(
-    () => expandAllForRange(events, monday, sunday),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [events, anchorDate],
-  );
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="grid grid-cols-7 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
-        {days.map((d, i) => {
-          const isToday = sameDay(d, today);
-          return (
-            <div key={i} className="border-r border-zinc-200 px-2 py-3 text-center dark:border-zinc-800">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                {WEEKDAYS[i]}
-              </div>
-              <div className={`mt-0.5 text-lg font-semibold tabular-nums ${
-                isToday ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-900 dark:text-zinc-100'
-              }`}>
-                {d.getDate()}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="grid flex-1 grid-cols-7 overflow-y-auto">
-        {days.map((d, i) => {
-          const dayStart = startOfDay(d);
-          const dayEnd = new Date(dayStart);
-          dayEnd.setHours(23, 59, 59, 999);
-          const dayAllDay = expandedEvents.filter((e) => e.all_day &&
-            new Date(e.end_at) >= dayStart && new Date(e.start_at) <= dayEnd);
-          const dayTimed = expandedEvents.filter((e) => !e.all_day && sameDay(new Date(e.start_at), d));
-          return (
-            <div
-              key={i}
-              className="min-h-[420px] cursor-pointer border-r border-zinc-200 p-1.5 transition-colors hover:bg-zinc-50/50 dark:border-zinc-800 dark:hover:bg-zinc-800/30"
-              onClick={() => onCreateQuick(d)}
-            >
-              {dayAllDay.length > 0 && (
-                <div className="mb-1.5 space-y-1">
-                  {dayAllDay.slice(0, 2).map((e) => (
-                    <WeekChip key={e.sid} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
-                  ))}
-                  {dayAllDay.length > 2 && (
-                    <button
-                      type="button"
-                      onClick={(ev) => { ev.stopPropagation(); onClickEvent(dayAllDay[2]); }}
-                      className="block w-full truncate text-left text-[10px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
-                    >
-                      +{dayAllDay.length - 2} more
-                    </button>
-                  )}
-                </div>
-              )}
-              {dayTimed.slice(0, 4).map((e) => (
-                <WeekChip key={e.sid} event={e} onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }} />
-              ))}
-              {dayTimed.length > 4 && (
-                <div className="mt-1 text-[10px] text-zinc-500">+{dayTimed.length - 4} more</div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function WeekChip({ event, onClick }: { event: ExpandedEvent; onClick: (e: React.MouseEvent) => void }) {
-  const colors = PRESET_COLORS.find((c) => c.name === event.color);
-  const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
-  const isDark = !event.color;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`group block w-full truncate rounded ${cls} px-1.5 py-1 text-left text-[10px] font-medium ${
-        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      } ${event.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`}
-    >
-      <span className="inline-flex items-center gap-1">
-        {event.isVirtual && (
-          <svg aria-hidden className="h-2.5 w-2.5 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-          </svg>
-        )}
-        <span className="truncate">{event.title}</span>
-      </span>
-      {!event.all_day && (
-        <span className="ml-1 opacity-80">{fmtHM(new Date(event.start_at))}</span>
-      )}
-    </button>
-  );
-}
-
-// ─── Month view ────────────────────────────────────────────────────────────
-
-function MonthView({
-  anchorDate, events, onClickEvent, onCreateQuick, onDayClick,
-}: {
-  anchorDate: Date;
-  events: CalendarEvent[];
-  onClickEvent: (e: ExpandedEvent) => void;
-  onCreateQuick: (date: Date) => void;
-  onDayClick: (date: Date) => void;
-}) {
-  const monthStart = startOfMonth(anchorDate);
-  const monthEnd = endOfMonth(anchorDate);
-
-  // Sunday-first grid (Outlook/Google style): start on the Sunday on/before
-  // the 1st and end on the Saturday on/after the last day. This yields 35
-  // (5 rows) or 42 (6 rows) cells, padded to a minimum of 5 rows so the
-  // grid height stays stable across short months.
-  const gridStart = new Date(monthStart);
-  gridStart.setDate(gridStart.getDate() - gridStart.getDay());
-  const gridEnd = new Date(monthEnd);
-  gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay()));
-
-  const cells: Date[] = [];
-  const cur = new Date(gridStart);
-  while (cur <= gridEnd) {
-    cells.push(new Date(cur));
-    cur.setDate(cur.getDate() + 1);
+  function minuteAt(clientY: number): number {
+    const element = timelineRef.current;
+    if (!element) return 0;
+    const rect = element.getBoundingClientRect();
+    return clampMinute(snap((clientY - rect.top + element.scrollTop) / PX_PER_MINUTE));
   }
-  while (cells.length < 35) {
-    const last = cells[cells.length - 1];
-    const next = new Date(last);
-    next.setDate(next.getDate() + 1);
-    cells.push(next);
+
+  function dayIndexFromClientX(clientX: number): number {
+    const element = timelineRef.current;
+    if (!element) return 0;
+    const rect = element.getBoundingClientRect();
+    const axisWidth = 58;
+    const contentX = clientX - rect.left + element.scrollLeft - axisWidth;
+    const dayWidth = (element.scrollWidth - axisWidth) / 7;
+    return Math.max(0, Math.min(6, Math.floor(contentX / dayWidth)));
   }
-  const rowCount = cells.length / 7; // 5 or 6
 
-  const now = useNow();
-  const today = startOfDay(now);
+  function dayIndexFromTarget(target: HTMLElement): number {
+    const value = target.closest('[data-day-index]')?.getAttribute('data-day-index');
+    return value ? Math.max(0, Math.min(6, Number(value))) : 0;
+  }
 
-  // Expand recurring events across the month — daily events appear on
-  // every day of the grid, weekly events only on byweekday matches,
-  // monthly events on the same day-of-month each month.
-  const expandedEvents = useMemo(
-    () => expandAllForRange(events, gridStart, gridEnd),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [events, anchorDate],
-  );
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Weekday header — full names on larger screens, short on small. */}
-      <div className="grid grid-cols-7 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
-        {WEEKDAYS_SUN.map((w, i) => (
-          <div key={w} className="border-r border-zinc-200 px-1 py-1.5 text-center text-[10px] font-semibold uppercase tracking-wider text-zinc-500 last:border-r-0 dark:border-zinc-800 dark:text-zinc-400">
-            <span className="hidden md:inline">{WEEKDAYS_SUN_FULL[i]}</span>
-            <span className="md:hidden">{w}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* Date grid — rows floor at 78px and stretch to fill on tall
-          screens, scrolling internally when the viewport is short. */}
-      <div
-        className="grid flex-1 grid-cols-7 overflow-y-auto"
-        style={{ gridTemplateRows: `repeat(${rowCount}, minmax(78px, 1fr))` }}
-      >
-        {cells.map((d, i) => {
-          const isCurrentMonth = d.getMonth() === anchorDate.getMonth();
-          const dayStart = startOfDay(d);
-          const dayEnd = new Date(dayStart);
-          dayEnd.setHours(23, 59, 59, 999);
-          const dayEvents = expandedEvents.filter((e) =>
-            new Date(e.end_at) >= dayStart && new Date(e.start_at) <= dayEnd,
-          );
-          const isToday = sameDay(d, today);
-          return (
-            <div
-              key={i}
-              onClick={() => onDayClick(d)}
-              onDoubleClick={() => onCreateQuick(d)}
-              className={`group relative flex min-h-0 cursor-pointer flex-col gap-0.5 border-r border-b border-zinc-200 p-1 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30 ${
-                isCurrentMonth ? '' : 'bg-zinc-50/60 dark:bg-zinc-900/30'
-              }`}
-            >
-              {/* Date number */}
-              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] tabular-nums sm:h-6 sm:w-6 sm:text-xs ${
-                isToday
-                  ? 'bg-rose-500 font-semibold text-white'
-                  : isCurrentMonth
-                  ? 'font-medium text-zinc-900 dark:text-zinc-100'
-                  : 'text-zinc-400 dark:text-zinc-600'
-              }`}>
-                {d.getDate()}
-              </span>
-
-              {/* Event blocks */}
-              <div className="min-h-0 flex-1 space-y-0.5 overflow-hidden">
-                {dayEvents.slice(0, 3).map((e) => (
-                  <MonthChip
-                    key={e.sid}
-                    event={e}
-                    faded={!isCurrentMonth}
-                    onClick={(ev) => { ev.stopPropagation(); onClickEvent(e); }}
-                  />
-                ))}
-                {dayEvents.length > 3 && (
-                  <button
-                    type="button"
-                    onClick={(ev) => { ev.stopPropagation(); onDayClick(d); }}
-                    className={`block w-full truncate text-left text-[10px] transition-colors ${
-                      isCurrentMonth
-                        ? 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200'
-                        : 'text-zinc-400 dark:text-zinc-600'
-                    }`}
-                  >
-                    +{dayEvents.length - 3} more
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function MonthChip({
-  event, onClick, faded,
-}: {
-  event: ExpandedEvent;
-  onClick: (e: React.MouseEvent) => void;
-  faded?: boolean;
-}) {
-  const colors = PRESET_COLORS.find((c) => c.name === event.color);
-  const cls = colors?.cls ?? 'bg-zinc-300 dark:bg-zinc-700';
-  const isDark = !event.color;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={event.title}
-      className={`flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] font-medium leading-tight ${cls} ${
-        isDark ? 'text-zinc-900 dark:text-zinc-50' : 'text-white'
-      } ${event.isVirtual ? 'ring-1 ring-inset ring-white/30' : ''} ${
-        faded ? 'opacity-50' : ''
-      }`}
-    >
-      {!event.all_day && (
-        <span className="shrink-0 tabular-nums opacity-80">{fmtHM(new Date(event.start_at))}</span>
-      )}
-      <span className="truncate">{event.title}</span>
-    </button>
-  );
-}
-
-// ─── Event modal ──────────────────────────────────────────────────────────
-
-function EventModal({
-  initial,
-  editing,
-  onClose,
-  onSaved,
-  onDelete,
-  colors,
-}: {
-  initial: { title: string; startISO: string; endISO: string; allDay: boolean; prefill: string } | null;
-  editing: CalendarEvent | null;
-  onClose: () => void;
-  onSaved: () => Promise<void> | void;
-  onDelete: (id: string) => Promise<void>;
-  colors: ReadonlyArray<{ name: string | null; cls: string; label: string }>;
-}) {
-  const isEdit = !!editing;
-  const [title, setTitle] = useState(editing?.title ?? initial?.title ?? '');
-  const [color, setColor] = useState<string | null>(editing?.color ?? null);
-  const [allDay, setAllDay] = useState<boolean>(editing?.all_day ?? initial?.allDay ?? false);
-  const [recurrence, setRecurrence] = useState<RecurrenceFreq>(parseRecurrence(editing?.recurrence));
-  const [notes, setNotes] = useState(editing?.notes ?? '');
-  const [start, setStart] = useState<string>(() => {
-    const d = new Date(editing?.start_at ?? initial?.startISO ?? new Date());
-    return toLocalInput(d);
-  });
-  const [end, setEnd] = useState<string>(() => {
-    const d = new Date(editing?.end_at ?? initial?.endISO ?? new Date());
-    return toLocalInput(d);
-  });
-  const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
+  function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    const resizeHandle = target.closest('[data-resize-edge]') as HTMLElement | null;
+    const eventElement = target.closest('[data-event-key]') as HTMLElement | null;
+    const dayIndex = dayIndexFromTarget(target);
+    const currentMinute = minuteAt(event.clientY);
+    if (eventElement) {
+      const start = Number(eventElement.dataset.start ?? 0);
+      const end = Number(eventElement.dataset.end ?? start + 30);
+      const type = resizeHandle?.dataset.resizeEdge === 'top' ? 'resize-top' : resizeHandle?.dataset.resizeEdge === 'bottom' ? 'resize-bottom' : 'move';
+      dragRef.current = { type, id: eventElement.dataset.eventId, sid: eventElement.dataset.eventKey, dayIndex, start, end, origin: currentMinute };
+      previewRef.current = { sid: eventElement.dataset.eventKey ?? '', dayIndex, start, end };
+      setPreview(previewRef.current);
+      suppressClickRef.current = false;
+    } else {
+      const end = Math.min(TIMELINE_HEIGHT / PX_PER_MINUTE, currentMinute + 30);
+      dragRef.current = { type: 'create', dayIndex, start: currentMinute, end, origin: currentMinute };
+      previewRef.current = { sid: 'draft', dayIndex, start: currentMinute, end };
+      setPreview(previewRef.current);
     }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function onPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const drag = dragRef.current;
+    const currentDayIndex = dayIndexFromClientX(event.clientX);
+    const current = minuteAt(event.clientY);
+    if (
+      Math.abs(current - drag.origin) >= SNAP_MINUTES
+      || (drag.type === 'move' && currentDayIndex !== drag.dayIndex)
+    ) suppressClickRef.current = true;
+    let next: { sid: string; dayIndex: number; start: number; end: number } | null = null;
+    if (drag.type === 'create') {
+      next = { sid: 'draft', dayIndex: drag.dayIndex, start: Math.min(drag.start, current), end: Math.max(drag.start + 15, Math.max(drag.start, current)) };
+    } else if (drag.sid) {
+      if (drag.type === 'move') {
+        const delta = current - drag.origin;
+        const duration = drag.end - drag.start;
+        const start = Math.max(0, Math.min(TIMELINE_HEIGHT - duration, snap(drag.start + delta)));
+        next = { sid: drag.sid, dayIndex: currentDayIndex, start, end: start + duration };
+      } else if (drag.type === 'resize-top') {
+        next = { sid: drag.sid, dayIndex: drag.dayIndex, start: Math.min(snap(current), drag.end - 15), end: drag.end };
+      } else {
+        next = { sid: drag.sid, dayIndex: drag.dayIndex, start: drag.start, end: Math.max(drag.start + 15, snap(current)) };
+      }
+    }
+    previewRef.current = next;
+    setPreview(next);
+  }
+
+  async  function onPointerUp(event: React.PointerEvent<HTMLDivElement>) {
+
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const drag = dragRef.current;
+    const result = previewRef.current;
+    previewRef.current = null;
+    setPreview(null);
+    if (!result) return;
+    if (drag.type === 'create') {
+      const date = ymd(days[result.dayIndex]);
+      const hour = Math.floor(result.start / 60);
+      const minute = result.start % 60;
+      onCreateSlot(date, `${pad2(hour)}:${pad2(minute)}`);
+      return;
+    }
+    if (!drag.id || !suppressClickRef.current) return;
+    const day = days[result.dayIndex];
+    const start = new Date(day);
+    start.setHours(Math.floor(result.start / 60), result.start % 60, 0, 0);
+    const end = new Date(day);
+    end.setHours(Math.floor(result.end / 60), result.end % 60, 0, 0);
+    await onUpdateEvent(drag.id, start.toISOString(), end.toISOString());
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDraggingSidebar(false);
+    const raw = event.dataTransfer.getData('application/x-sidebar-item');
+    if (!raw) return;
+    try {
+      const item = JSON.parse(raw) as { type: 'habit' | 'task'; id: string };
+      const dayIndex = dayIndexFromClientX(event.clientX);
+      const minute = minuteAt(event.clientY);
+      onSidebarDrop(item.type, item.id, ymd(days[dayIndex]), `${pad2(Math.floor(minute / 60))}:${pad2(minute % 60)}`);
+    } catch {
+      // Ignore malformed drag payloads.
+    }
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 overflow-x-auto border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
+        <div className="grid min-w-[704px]" style={{ gridTemplateColumns: '58px repeat(7, minmax(92px, 1fr))' }}>
+          <div />
+          {days.map((day) => <div key={ymd(day)} className="border-l border-zinc-200 px-2 py-2 text-center dark:border-zinc-800"><div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{WEEKDAYS[(day.getDay() + 6) % 7]}</div><div className={`mt-0.5 text-base font-semibold tabular-nums ${sameDay(day, new Date()) ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-900 dark:text-zinc-100'}`}>{day.getDate()}</div></div>)}
+        </div>
+      </div>
+      <div className="shrink-0 overflow-x-auto border-b border-zinc-200 dark:border-zinc-800">
+        <div className="grid min-w-[704px]" style={{ gridTemplateColumns: '58px repeat(7, minmax(92px, 1fr))' }}>
+          <div className="flex items-center justify-end px-2 text-[10px] uppercase tracking-wider text-zinc-400">All day</div>
+          {days.map((day) => <div key={ymd(day)} className="min-h-8 border-l border-zinc-200 p-1 dark:border-zinc-800">{allDayEvents.filter((item) => sameDay(new Date(item.start_at), day)).map((item) => <button key={item.sid} type="button" onClick={() => onClickEvent(item)} onDoubleClick={() => onDoubleClickEvent(item)} className={`mb-0.5 block w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-zinc-900 dark:text-zinc-100 ${selectedEventId === item.id ? 'bg-rose-400 ring-2 ring-rose-500/60 dark:bg-rose-500' : 'bg-zinc-300 dark:bg-zinc-700'}`}>{item.title}</button>)}</div>)}
+        </div>
+      </div>
+      <div ref={timelineRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-sidebar-item')) { event.preventDefault(); setDraggingSidebar(true); } }} onDragLeave={() => setDraggingSidebar(false)} onDrop={handleDrop} className={`min-h-0 flex-1 overflow-x-auto overflow-y-auto ${draggingSidebar ? 'bg-emerald-50/40 dark:bg-emerald-950/20' : ''}`} style={{ touchAction: 'pan-y' }}>
+        <div className="grid min-w-[704px]" style={{ gridTemplateColumns: '58px repeat(7, minmax(92px, 1fr))', height: TIMELINE_HEIGHT }}>
+          <div className="relative border-r border-zinc-200 dark:border-zinc-800">{Array.from({ length: 24 }, (_, hour) => <div key={hour} className="absolute right-2 -translate-y-1/2 text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500" style={{ top: hour * PX_PER_HOUR }}>{timeLabel(hour)}</div>)}</div>
+          {days.map((day, dayIndex) => {
+            const dayEvents = timedEvents.filter((item) => {
+              if (preview?.sid === item.sid) return preview.dayIndex === dayIndex;
+              return sameDay(new Date(item.start_at), day);
+            });
+            return <div key={ymd(day)} data-day-index={dayIndex} className="relative border-l border-zinc-200 bg-[linear-gradient(to_bottom,transparent_59px,rgba(161,161,170,0.16)_60px)] dark:border-zinc-800 dark:bg-[linear-gradient(to_bottom,transparent_59px,rgba(113,113,122,0.16)_60px)]" style={{ backgroundSize: '100% 60px' }}>
+              {Array.from({ length: 24 }, (_, hour) => <div key={hour} className="pointer-events-none absolute inset-x-0 border-t border-zinc-200/60 dark:border-zinc-800/60" style={{ top: hour * PX_PER_HOUR }} />)}
+              {dayEvents.map((item) => {
+                const baseStart = Math.max(0, (new Date(item.start_at).getHours() * 60) + new Date(item.start_at).getMinutes());
+                const baseEnd = Math.min(TIMELINE_HEIGHT, (new Date(item.end_at).getHours() * 60) + new Date(item.end_at).getMinutes());
+                const active = preview?.sid === item.sid ? preview : null;
+                const start = active?.start ?? baseStart;
+                const end = active?.end ?? Math.max(baseStart + 15, baseEnd);
+                const colors = eventColor(item);
+                return <div key={item.sid} data-event-key={item.sid} data-event-id={item.id} data-day-index={dayIndex} data-start={baseStart} data-end={Math.max(baseStart + 15, baseEnd)} onClick={(event) => { event.stopPropagation(); if (!suppressClickRef.current) onClickEvent(item); suppressClickRef.current = false; }} onDoubleClick={(event) => { event.stopPropagation(); onDoubleClickEvent(item); }} className={`group absolute inset-x-1 z-10 cursor-grab overflow-hidden rounded-md px-2 py-1 text-[11px] font-medium shadow-sm active:cursor-grabbing ${colors.cls} ${colors.dark ? 'text-zinc-900 dark:text-zinc-100' : 'text-white'} ${selectedEventId === item.id ? 'ring-2 ring-rose-500 ring-offset-1 ring-offset-white dark:ring-rose-400 dark:ring-offset-zinc-900' : ''} ${item.isVirtual ? 'opacity-90 ring-1 ring-inset ring-white/30' : ''}`} style={{ top: start * PX_PER_MINUTE, height: Math.max(20, (end - start) * PX_PER_MINUTE) }}>
+                  <div data-resize-edge="top" data-resize-edge-value="top" onClick={(event) => event.stopPropagation()} className="absolute inset-x-0 top-0 z-20 h-3 cursor-ns-resize" aria-label="Resize start time" />
+                  <div data-resize-edge="bottom" onClick={(event) => event.stopPropagation()} className="absolute inset-x-0 bottom-0 z-20 h-3 cursor-ns-resize" aria-label="Resize end time" />
+                  <span className="block truncate leading-tight">{item.title}</span>
+                  {end - start >= 30 && <span className="block truncate text-[10px] opacity-80">{shortTime(new Date(item.start_at))} - {shortTime(new Date(item.end_at))}</span>}
+                </div>;
+              })}
+              {preview?.dayIndex === dayIndex && preview.sid === 'draft' && <div className="pointer-events-none absolute inset-x-1 z-20 rounded-md border border-dashed border-rose-400 bg-rose-100/60" style={{ top: preview.start * PX_PER_MINUTE, height: Math.max(20, (preview.end - preview.start) * PX_PER_MINUTE) }} />}
+            </div>;
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MonthGrid({ anchorDate, events, selectedEventId, onClickEvent, onDoubleClickEvent, onSelectDate }: { anchorDate: Date; events: ExpandedEvent[]; selectedEventId: string | null; onClickEvent: (event: ExpandedEvent) => void; onDoubleClickEvent: (event: ExpandedEvent) => void; onSelectDate: (date: Date) => void }) {
+  const monthStart = startOfMonth(anchorDate);
+  const daysInMonth = endOfMonth(anchorDate).getDate();
+  const offset = (monthStart.getDay() + 6) % 7;
+  const cells = [...Array.from({ length: offset }, () => null), ...Array.from({ length: daysInMonth }, (_, index) => { const date = new Date(monthStart); date.setDate(index + 1); return date; })];
+  return <div className="flex h-full min-h-0 flex-col"><div className="grid grid-cols-7 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">{MONTH_WEEKDAYS.map((day, index) => <div key={`${day}-${index}`} className="py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{day}</div>)}</div><div className="grid min-h-0 flex-1 grid-cols-7 auto-rows-[minmax(92px,1fr)] overflow-auto">{cells.map((date, index) => date ? <div key={ymd(date)} onClick={() => onSelectDate(date)} className="group min-w-0 cursor-pointer border-b border-r border-zinc-200 p-1 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/30"><span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs ${sameDay(date, new Date()) ? 'bg-rose-500 font-semibold text-white' : 'text-zinc-800 dark:text-zinc-200'}`}>{date.getDate()}</span><div className="mt-1 space-y-0.5 overflow-hidden">{events.filter((event) => new Date(event.start_at).toDateString() === date.toDateString()).slice(0, 4).map((event) => <button key={event.sid} type="button" onClick={(click) => { click.stopPropagation(); onClickEvent(event); }} onDoubleClick={(click) => { click.stopPropagation(); onDoubleClickEvent(event); }} className={`block w-full truncate rounded px-1 py-0.5 text-left text-[10px] text-zinc-900 dark:text-zinc-100 ${selectedEventId === event.id ? 'bg-rose-400 ring-2 ring-rose-500/60 dark:bg-rose-500' : 'bg-zinc-300 dark:bg-zinc-700'}`}>{event.title}</button>)}</div></div> : <span key={`blank-${index}`} className="border-b border-r border-zinc-200 dark:border-zinc-800" />)}</div></div>;
+}
+
+function AddTaskModal({ date, time, onClose, onSave }: { date: string; time: string; onClose: () => void; onSave: (title: string, notes: string, repeat: RecurrenceFreq) => Promise<void> }) {
+  const [title, setTitle] = useState('');
+  const [notes, setNotes] = useState('');
+  const [repeat, setRepeat] = useState<RecurrenceFreq>('NONE');
+  const [saving, setSaving] = useState(false);
+  async function save() { if (!title.trim() || saving) return; setSaving(true); try { await onSave(title.trim(), notes.trim(), repeat); } finally { setSaving(false); } }
+  return <ModalShell title="Add task" onClose={onClose}><p className="text-xs text-zinc-500 dark:text-zinc-400">{new Date(`${date}T${time}:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at {time}</p><label className="block"><span className="label">Title</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void save(); }} className="field" /></label><label className="block"><span className="label">Notes</span><textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} className="field resize-none" /></label><label className="block"><span className="label">Repeat</span><select value={repeat} onChange={(event) => setRepeat(event.target.value as RecurrenceFreq)} className="field"><option value="NONE">Doesn&apos;t repeat</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="button-muted">Cancel</button><button type="button" disabled={!title.trim() || saving} onClick={() => void save()} className="button-primary">{saving ? 'Saving...' : 'Add task'}</button></div></ModalShell>;
+}
+
+function EventModal({ event, onClose, onSaved, onRequestDelete }: { event: ExpandedEvent; onClose: () => void; onSaved: () => Promise<void>; onRequestDelete: () => void }) {
+  const [title, setTitle] = useState(event.title);
+  const [notes, setNotes] = useState(event.notes ?? '');
+  const [color, setColor] = useState<string | null>(event.color ?? null);
+  const [start, setStart] = useState(() => localInput(new Date(event.start_at)));
+  const [end, setEnd] = useState(() => localInput(new Date(event.end_at)));
+  const [repeat, setRepeat] = useState<RecurrenceFreq>(recurrenceFrequency(event.recurrence));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function save() {
+    if (!title.trim()) return;
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || endDate <= startDate) { setError('End must be after start.'); return; }
+    setSaving(true); setError(null);
+    const { error: updateError } = await supabase.from('calendar_events').update({ title: title.trim(), notes: notes.trim() || null, color, start_at: startDate.toISOString(), end_at: endDate.toISOString(), recurrence: recurrenceJson(repeat, startDate) }).eq('id', event.id);
+    setSaving(false);
+    if (updateError) { setError(updateError.message); return; }
+    await onSaved();
+  }
+  return <ModalShell title="Edit event" onClose={onClose}><label className="block"><span className="label">Title</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} className="field" /></label><div className="grid grid-cols-2 gap-2"><label className="block"><span className="label">Starts</span><input type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} step={900} className="field" /></label><label className="block"><span className="label">Ends</span><input type="datetime-local" value={end} onChange={(event) => setEnd(event.target.value)} step={900} className="field" /></label></div><label className="block"><span className="label">Repeat</span><select value={repeat} onChange={(event) => setRepeat(event.target.value as RecurrenceFreq)} className="field"><option value="NONE">Doesn&apos;t repeat</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><div><span className="label">Color</span><div className="mt-1 flex gap-2">{COLORS.map((item) => <button key={item.label} type="button" aria-label={`Color ${item.label}`} aria-pressed={color === item.name} onClick={() => setColor(item.name)} className={`h-5 w-5 rounded-full ${item.cls} ${color === item.name ? 'ring-2 ring-zinc-900 ring-offset-2 dark:ring-zinc-100' : ''}`} />)}</div></div><label className="block"><span className="label">Notes</span><textarea rows={2} value={notes} onChange={(event) => setNotes(event.target.value)} className="field resize-none" /></label>{error && <p className="text-xs text-red-600">{error}</p>}<div className="flex items-center justify-between gap-2"><button type="button" onClick={onRequestDelete} className="button-danger">Delete</button><div className="flex gap-2"><button type="button" onClick={onClose} className="button-muted">Cancel</button><button type="button" disabled={!title.trim() || saving} onClick={() => void save()} className="button-primary">{saving ? 'Saving...' : 'Save'}</button></div></div></ModalShell>;
+}
+
+function localInput(date: Date): string {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function DeleteEventModal({ event, onClose, onConfirm }: { event: ExpandedEvent; onClose: () => void; onConfirm: () => void }) {
+  useEffect(() => {
+    const handleKeyDown = (keyboardEvent: KeyboardEvent) => {
+      if (keyboardEvent.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  const save = useCallback(async () => {
-    setErr(null);
-    if (!title.trim()) {
-      setErr('Title is required.');
-      return;
-    }
-    const startD = new Date(start);
-    const endD = new Date(end);
-    if (Number.isNaN(startD.getTime()) || Number.isNaN(endD.getTime())) {
-      setErr('Pick valid start and end times.');
-      return;
-    }
-
-    let startISO = startD.toISOString();
-    let endISO = endD.toISOString();
-    if (allDay) {
-      startD.setHours(0, 0, 0, 0);
-      endD.setHours(23, 59, 59, 999);
-      startISO = startD.toISOString();
-      endISO = endD.toISOString();
-    }
-    if (new Date(endISO) <= new Date(startISO)) {
-      setErr('End must be after start.');
-      return;
-    }
-
-    setSubmitting(true);
-    const uid = await getCurrentUserId();
-    if (!uid) {
-      setSubmitting(false);
-      setErr('Not signed in.');
-      return;
-    }
-    const payload = {
-      user_id: uid,
-      title: title.trim(),
-      start_at: startISO,
-      end_at: endISO,
-      color,
-      notes: notes.trim() || null,
-      all_day: allDay,
-      recurrence: buildRecurrence(recurrence, startD),
-    };
-    let error: { message: string; code?: string } | null = null;
-    let data: CalendarEvent | null = null;
-    if (isEdit && editing) {
-      const res = await supabase.from('calendar_events').update(payload).eq('id', editing.id).select().single();
-      error = res.error;
-      data = res.data as CalendarEvent | null;
-    } else {
-      const res = await supabase.from('calendar_events').insert(payload).select().single();
-      error = res.error;
-      data = res.data as CalendarEvent | null;
-    }
-    setSubmitting(false);
-    if (error) {
-      const missing = error.code === 'PGRST205' || /schema cache|calendar_events/.test(error.message);
-      setErr(missing
-        ? 'Apply lib/supabase-apply-calendar-redesign.sql in the SQL Editor.'
-        : `Save failed: ${error.message}`,
-      );
-      return;
-    }
-    await onSaved();
-  }, [title, start, end, color, allDay, recurrence, notes, isEdit, editing, onSaved]);
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-      onClick={() => !submitting && onClose()}
-    >
-      <fieldset
-        disabled={submitting}
-        className="w-full max-w-md space-y-4 rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900 disabled:opacity-60"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              {isEdit ? 'Edit event' : 'New event'}
-            </h3>
-            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-              {isEdit ? 'Update the commitment.' : 'Block time on your calendar.'}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div>
-          <label className="block">
-            <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Title</span>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Tennis, School, Doctor…"
-              autoFocus
-              className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </label>
-        </div>
-
-        <div className="flex items-center gap-2 rounded-lg bg-zinc-50 p-2 dark:bg-zinc-800/50">
-          <input
-            id="all-day-toggle"
-            type="checkbox"
-            checked={allDay}
-            onChange={(e) => setAllDay(e.target.checked)}
-            className="h-4 w-4 rounded border-zinc-300 text-rose-500 focus:ring-rose-400 dark:border-zinc-600"
-          />
-          <label htmlFor="all-day-toggle" className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
-            All-day event
-          </label>
-          <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-            (holidays, full-day events)
-          </span>
-        </div>
-
-        <div className={`grid gap-3 ${allDay ? 'grid-cols-2' : 'grid-cols-2'}`}>
-          <label className="block">
-            <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Starts</span>
-            <input
-              type="date"
-              value={start.slice(0, 10)}
-              onChange={(e) => setStart(`${e.target.value}${start.slice(10)}`)}
-              className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </label>
-          <label className="block">
-            <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Ends</span>
-            <input
-              type="date"
-              value={end.slice(0, 10)}
-              onChange={(e) => setEnd(`${e.target.value}${end.slice(10)}`)}
-              className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-            />
-          </label>
-        </div>
-
-        {!allDay && (
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Time</span>
-              <input
-                type="time"
-                value={start.slice(11, 16)}
-                onChange={(e) => setStart(`${start.slice(0, 10)}T${e.target.value}:00`)}
-                step={900}
-                className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-              />
-            </label>
-            <label className="block">
-              <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">End time</span>
-              <input
-                type="time"
-                value={end.slice(11, 16)}
-                onChange={(e) => setEnd(`${end.slice(0, 10)}T${e.target.value}:00`)}
-                step={900}
-                className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-              />
-            </label>
-          </div>
-        )}
-
-        <div>
-          <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Repeats</span>
-          <div className="mt-1 flex flex-wrap gap-1.5">
-            {(['NONE', 'DAILY', 'WEEKLY', 'MONTHLY'] as const).map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => setRecurrence(r)}
-                aria-pressed={recurrence === r}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  recurrence === r
-                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
-                    : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700'
-                }`}
-              >
-                {r === 'NONE' ? 'Doesn’t repeat' : r === 'DAILY' ? 'Daily' : r === 'WEEKLY' ? 'Weekly' : 'Monthly'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Color</span>
-          <div className="mt-1 flex items-center gap-2">
-            {colors.map((c) => (
-              <button
-                key={c.label}
-                type="button"
-                onClick={() => setColor(c.name)}
-                aria-label={`Color ${c.label}`}
-                aria-pressed={color === c.name}
-                className={`h-5 w-5 rounded-full ${c.cls} transition-all ${
-                  color === c.name
-                    ? 'ring-2 ring-zinc-900 ring-offset-2 ring-offset-white dark:ring-zinc-100 dark:ring-offset-zinc-900'
-                    : 'hover:scale-110'
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-
-        <label className="block">
-          <span className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Notes</span>
-          <textarea
-            value={notes ?? ''}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={2}
-            placeholder="Optional"
-            className="mt-0.5 w-full resize-none rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-700"
-          />
-        </label>
-
-        {err && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
-            {err}
-          </div>
-        )}
-
-        <div className="flex items-center justify-between gap-2">
-          {isEdit ? (
-            <button
-              type="button"
-              onClick={() => editing && onDelete(editing.id)}
-              className="rounded-md px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 dark:hover:bg-red-950/30"
-            >
-              Delete
-            </button>
-          ) : <span />}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={save}
-              disabled={!title.trim()}
-              className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-            >
-              {submitting ? 'Saving…' : isEdit ? 'Save' : 'Add'}
-            </button>
-          </div>
-        </div>
-      </fieldset>
+  return <ModalShell title="Delete event?" onClose={onClose}>
+    <p className="text-sm text-zinc-600 dark:text-zinc-300">This will permanently remove <strong>{event.title}</strong> from the calendar.</p>
+    <div className="flex justify-end gap-2">
+      <button type="button" onClick={onClose} className="button-muted">Cancel</button>
+      <button type="button" onClick={onConfirm} className="button-danger">Delete</button>
     </div>
-  );
+  </ModalShell>;
 }
 
-// ─── Local-time helper for HTML5 datetime inputs ──────────────────────────
-
-function toLocalInput(d: Date): string {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-
-// ─── Voice button (uses Web Speech API when available) ────────────────────
-
-function VoiceButton({ onTranscript }: { onTranscript: (text: string) => void }) {
-  const [supported, setSupported] = useState(true);
-  const [listening, setListening] = useState(false);
-  type SR = { new (): SpeechRecognitionLike; prototype: SpeechRecognitionLike };
-  interface SpeechRecognitionLike extends EventTarget {
-    lang: string;
-    continuous: boolean;
-    interimResults: boolean;
-    onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
-    onend: (() => void) | null;
-    onerror: (() => void) | null;
-    start(): void;
-    stop(): void;
-  }
-  const srRef = useRef<SpeechRecognitionLike | null>(null);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const w = window as unknown as { SpeechRecognition?: SR; webkitSpeechRecognition?: SR };
-    const Cls = w.SpeechRecognition ?? w.webkitSpeechRecognition;
-    setSupported(Boolean(Cls));
-  }, []);
-
-  const toggle = useCallback(() => {
-    if (!supported) {
-      const fallback = prompt('Voice input not supported by this browser — type the event:');
-      if (fallback) onTranscript(fallback);
-      return;
-    }
-    if (listening) {
-      srRef.current?.stop();
-      setListening(false);
-      return;
-    }
-    const w = window as unknown as { SpeechRecognition: SR; webkitSpeechRecognition: SR };
-    const Cls = w.SpeechRecognition ?? w.webkitSpeechRecognition;
-    const sr = new Cls();
-    sr.lang = 'en-US';
-    sr.continuous = false;
-    sr.interimResults = false;
-    sr.onresult = (e) => {
-      const text = e.results?.[0]?.[0]?.transcript ?? '';
-      if (text) onTranscript(text);
-    };
-    sr.onend = () => setListening(false);
-    sr.onerror = () => setListening(false);
-    srRef.current = sr;
-    setListening(true);
-    sr.start();
-  }, [supported, listening, onTranscript]);
-
-  return (
-    <button
-      type="button"
-      onClick={toggle}
-      aria-pressed={listening}
-      title={supported ? (listening ? 'Listening…' : 'Voice input') : 'Voice input unavailable — opens prompt fallback'}
-      className={`rounded-md p-1.5 transition-colors ${
-        listening
-          ? 'bg-rose-500 text-white shadow-[0_0_0_4px_rgba(244,63,94,0.18)]'
-          : 'border border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:border-zinc-600 dark:hover:bg-zinc-700'
-      }`}
-    >
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-      </svg>
-    </button>
-  );
+function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}><div className="w-full max-w-md space-y-3 rounded-xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900" onClick={(event) => event.stopPropagation()}><div className="flex items-center justify-between"><h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{title}</h2><button type="button" aria-label="Close" title="Close" onClick={onClose} className="rounded p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">×</button></div>{children}</div></div>;
 }

@@ -88,7 +88,8 @@ export default function TodoList() {
   }, []);
 
   useEffect(() => {
-    loadTasks();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadTasks();
   }, [loadTasks]);
 
   // Close add form when clicking outside
@@ -265,7 +266,7 @@ export default function TodoList() {
   }
 
   return (
-    <div>
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto px-2 py-2 sm:px-3">
       {/* Error banner */}
       {error && (
         <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
@@ -280,11 +281,11 @@ export default function TodoList() {
       )}
 
       {/* Add Task — compact button / expanded form */}
-      <section className="mb-8">
+      <section className="mb-4 shrink-0">
         {!showAddForm ? (
           <button
             onClick={() => setShowAddForm(true)}
-            className="flex w-full items-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-400 shadow-sm transition-colors hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-300"
+            className="flex w-full items-center gap-2 rounded-md border border-dashed border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-300"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -294,7 +295,7 @@ export default function TodoList() {
         ) : (
           <div
             ref={addFormRef}
-            className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+            className="rounded-md border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
           >
             <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-3">
@@ -392,7 +393,7 @@ export default function TodoList() {
       </section>
 
       {/* Section-grouped rows — all four categories always visible, even when empty. */}
-      <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {grouped.map((bucket) => (
           <TaskRow
             key={bucket.section}
@@ -470,7 +471,8 @@ function TaskRow({
     : 'border-zinc-200 dark:border-zinc-700';
 
   return (
-    <div
+    <section
+      aria-labelledby={`${section}-tasks-heading`}
       onDragOver={onDragOver}
       onDrop={(e) => {
         const taskId = e.dataTransfer.getData('text/plain');
@@ -488,27 +490,26 @@ function TaskRow({
         }
         onDrop(e, newDate);
       }}
-      className={`flex h-full flex-col overflow-hidden rounded-2xl border shadow-sm transition-all duration-200 ${sectionColor} ${draggedId ? 'min-h-[160px]' : ''}`}
+      className={`min-w-0 overflow-hidden rounded-md border shadow-sm transition-all duration-200 ${sectionColor} ${draggedId ? 'min-h-[120px]' : ''}`}
     >
-      {/* Row header */}
-      <div className={`border-b px-4 py-3 ${headerBorderColor}`}>
+      <div className={`border-b px-3 py-2 ${headerBorderColor}`}>
         <div className="flex items-center justify-between">
-          <h3 className={`text-sm font-semibold ${labelColor}`}>
+          <h3 id={`${section}-tasks-heading`} className={`text-[11px] font-semibold uppercase tracking-wider ${labelColor}`}>
             {label}
           </h3>
-          {pendingCount > 0 && (
-            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${badgeColor}`}>
-              {pendingCount}
-            </span>
-          )}
+          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${badgeColor}`}>{pendingCount}</span>
         </div>
       </div>
 
-      {/* Tasks */}
-      <div className="space-y-2 p-4">
+      <div role="table" aria-label={`${label} tasks`} className="min-w-0">
+        <div role="row" className="grid grid-cols-[2.25rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-zinc-200/80 px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-400 dark:border-zinc-800 dark:text-zinc-500">
+          <span role="columnheader">Done</span>
+          <span role="columnheader">To-do</span>
+          <span role="columnheader" className="sr-only">Actions</span>
+        </div>
         {tasks.length === 0 ? (
           <div className="flex items-center justify-center rounded-lg border-2 border-dashed border-zinc-200 py-6 dark:border-zinc-700">
-            <p className="text-xs text-zinc-300 dark:text-zinc-600">
+            <p className="px-3 py-3 text-xs text-zinc-400 dark:text-zinc-600">
               {section === 'overdue' ? 'No overdue tasks' : section === 'today' ? 'No tasks for today' : section === 'tomorrow' ? 'No tasks for tomorrow' : 'No upcoming tasks'}
             </p>
           </div>
@@ -527,7 +528,7 @@ function TaskRow({
           ))
         )}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -631,15 +632,15 @@ function TaskCard({
       draggable={!editing}
       onDragStart={(e) => onDragStart(e, task.id)}
       onDragEnd={onDragEnd}
-      className={`group cursor-grab rounded-lg border p-3 transition-all duration-200 active:cursor-grabbing ${
-        isCompleted
-          ? 'border-zinc-200 bg-zinc-50/60 dark:border-zinc-800 dark:bg-zinc-900/60'
-          : 'border-zinc-200 bg-white shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900'
-      } ${isDragging ? 'opacity-50 shadow-lg ring-2 ring-violet-400 dark:ring-violet-500' : ''}`}
+      role="row"
+      className={`group grid grid-cols-[2.25rem_minmax(0,1fr)_auto] items-start gap-2 border-b border-zinc-100 px-3 py-1.5 transition-colors last:border-b-0 active:cursor-grabbing dark:border-zinc-800 ${
+        isCompleted ? 'bg-zinc-50/60 dark:bg-zinc-900/60' : 'bg-white hover:bg-zinc-50/70 dark:bg-zinc-900 dark:hover:bg-zinc-800/40'
+      } ${isDragging ? 'opacity-50 ring-1 ring-violet-400 dark:ring-violet-500' : ''}`}
     >
-      <div className="flex items-start gap-2.5">
+      <div className="flex items-start pt-0.5">
         {/* Checkbox */}
         <button
+          role="cell"
           onClick={() => onToggle(task.id)}
           className={`relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-200 ${
             isCompleted
@@ -657,7 +658,7 @@ function TaskCard({
         </button>
 
         {/* Content */}
-        <div className="min-w-0 flex-1">
+        <div role="cell" className="min-w-0">
           {editing ? (
             <div className="space-y-2">
               <input
@@ -722,7 +723,7 @@ function TaskCard({
           ) : (
             <>
               <p
-                className={`text-sm font-medium transition-colors duration-200 ${
+                className={`truncate text-xs font-medium transition-colors duration-200 ${
                   isCompleted
                     ? 'text-zinc-400 line-through dark:text-zinc-500'
                     : 'text-zinc-900 dark:text-zinc-100'
@@ -731,12 +732,12 @@ function TaskCard({
                 {task.title}
               </p>
               {task.duration_minutes != null && (
-                <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                <p className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
                   {task.duration_minutes}m
                 </p>
               )}
               {task.notes ? (
-                <p className="mt-1 whitespace-pre-wrap text-xs text-zinc-500 dark:text-zinc-400">
+                <p className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
                   {task.notes}
                 </p>
               ) : null}
@@ -746,6 +747,7 @@ function TaskCard({
 
         {/* Action buttons (hidden while editing) */}
         {!editing && (
+          <div role="cell" className="flex items-start gap-1 pt-0.5 opacity-70 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
           <>
             {/* Drag handle */}
             <svg
@@ -816,6 +818,7 @@ function TaskCard({
               </svg>
             </button>
           </>
+          </div>
         )}
       </div>
 
