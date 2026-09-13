@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
 interface Habit {
@@ -134,7 +134,10 @@ export default function HabitHistoryDashboard({
   const dates = useMemo(() => buildDates(), []);
   const [completionKeys, setCompletionKeys] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set());
+  // Bumped after every committed toggle so an in-flight history load can
+  // detect that its snapshot went stale and avoid clobbering the update.
+  const mutationEpochRef = useRef(0);
   const [newHabitName, setNewHabitName] = useState('');
   const [newFrequency, setNewFrequency] = useState('daily');
   const [newCustomFrequency, setNewCustomFrequency] = useState('');
@@ -147,19 +150,37 @@ export default function HabitHistoryDashboard({
       return;
     }
     setLoading(true);
-    const { data, error: queryError } = await supabase
-      .from('habit_completions')
-      .select('habit_id, completed_date')
-      .eq('user_id', userId)
-      .gte('completed_date', dateKey(dates[dates.length - 1]))
-      .lte('completed_date', dateKey(dates[0]));
-    if (queryError) {
-      onError(`Failed to load habit history: ${queryError.message}`);
-      setLoading(false);
-      return;
+    for (;;) {
+      // Snapshot the mutation epoch before fetching: if a toggle commits while
+      // this query is in flight, the snapshot is stale and must not overwrite
+      // the fresh optimistic state.
+      const epochAtStart = mutationEpochRef.current;
+      // `dates` is NOT in chronological order: it is newest week first, each
+      // week running Monday → Sunday. Bounding the query by dates[0] (the
+      // current week's Monday) silently excluded every completion from
+      // Tuesday onward, so checked days reset after a refresh; bounding by
+      // dates[dates.length - 1] additionally dropped the older week's first
+      // six days. Always derive the window from the actual min/max instead.
+      const oldest = dates.reduce((min, date) => (date < min ? date : min), dates[0]);
+      const newest = dates.reduce((max, date) => (date > max ? date : max), dates[0]);
+      const { data, error: queryError } = await supabase
+        .from('habit_completions')
+        .select('habit_id, completed_date')
+        .eq('user_id', userId)
+        .gte('completed_date', dateKey(oldest))
+        .lte('completed_date', dateKey(newest));
+      if (queryError) {
+        onError(`Failed to load habit history: ${queryError.message}`);
+        setLoading(false);
+        return;
+      }
+      if (mutationEpochRef.current === epochAtStart) {
+        setCompletionKeys(new Set((data ?? []).map((row: CompletionRow) => `${row.habit_id}:${row.completed_date}`)));
+        setLoading(false);
+        return;
+      }
+      // A toggle committed mid-fetch — refetch so the snapshot includes it.
     }
-    setCompletionKeys(new Set((data ?? []).map((row: CompletionRow) => `${row.habit_id}:${row.completed_date}`)));
-    setLoading(false);
   }, [dates, onError, userId]);
 
   useEffect(() => {
@@ -183,8 +204,8 @@ export default function HabitHistoryDashboard({
   async function toggleCompletion(habitId: string, date: Date) {
     if (!userId) return;
     const key = `${habitId}:${dateKey(date)}`;
-    if (busyKey) return;
-    setBusyKey(key);
+    if (busyKeys.has(key)) return;
+    setBusyKeys((current) => new Set(current).add(key));
     const wasCompleted = completionKeys.has(key);
     const result = wasCompleted
       ? await supabase.from('habit_completions').delete().eq('habit_id', habitId).eq('user_id', userId).eq('completed_date', dateKey(date))
@@ -193,8 +214,12 @@ export default function HabitHistoryDashboard({
           { onConflict: 'habit_id,completed_date', ignoreDuplicates: true },
         );
     if (result.error) {
+      // Do NOT flip the checkbox on failure — re-read the database instead so
+      // the UI always reflects stored truth.
       onError(`Failed to update completion: ${result.error.message}`);
+      void loadCompletions();
     } else {
+      mutationEpochRef.current += 1;
       setCompletionKeys((current) => {
         const next = new Set(current);
         if (wasCompleted) next.delete(key);
@@ -202,7 +227,11 @@ export default function HabitHistoryDashboard({
         return next;
       });
     }
-    setBusyKey(null);
+    setBusyKeys((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
   }
 
   async function addHabit() {
@@ -291,7 +320,7 @@ export default function HabitHistoryDashboard({
                     const key = `${habit.id}:${dateKey(date)}`;
                     const completed = completionKeys.has(key);
                     const expected = isExpected(habit, date);
-                    return <div key={key} className={`flex min-h-12 items-center justify-center border-r border-zinc-100 dark:border-zinc-800 ${index % 7 === 6 ? 'border-r-2' : ''}`}><button type="button" onClick={() => void toggleCompletion(habit.id, date)} disabled={busyKey !== null} aria-label={`${habit.name}, ${formatDate(date)}, ${completed ? 'completed' : 'not completed'}${expected ? '' : ', not scheduled'}`} title={expected ? `${formatDate(date)}: ${completed ? 'Completed' : 'Not completed'}` : `${formatDate(date)}: Not scheduled`} className={`flex h-6 w-6 items-center justify-center rounded border text-xs transition-colors ${completed ? 'border-emerald-500 bg-emerald-500 font-bold text-white' : expected ? 'border-zinc-300 bg-white text-transparent hover:border-emerald-400 dark:border-zinc-600 dark:bg-zinc-900' : 'border-dashed border-zinc-200 bg-zinc-50 text-transparent opacity-50 dark:border-zinc-700 dark:bg-zinc-950'}`}>{completed ? '✓' : '·'}</button></div>;
+                    return <div key={key} className={`flex min-h-12 items-center justify-center border-r border-zinc-100 dark:border-zinc-800 ${index % 7 === 6 ? 'border-r-2' : ''}`}><button type="button" onClick={() => void toggleCompletion(habit.id, date)} disabled={busyKeys.has(key)} aria-label={`${habit.name}, ${formatDate(date)}, ${completed ? 'completed' : 'not completed'}${expected ? '' : ', not scheduled'}`} title={expected ? `${formatDate(date)}: ${completed ? 'Completed' : 'Not completed'}` : `${formatDate(date)}: Not scheduled`} className={`flex h-6 w-6 items-center justify-center rounded border text-xs transition-colors ${completed ? 'border-emerald-500 bg-emerald-500 font-bold text-white' : expected ? 'border-zinc-300 bg-white text-transparent hover:border-emerald-400 dark:border-zinc-600 dark:bg-zinc-900' : 'border-dashed border-zinc-200 bg-zinc-50 text-transparent opacity-50 dark:border-zinc-700 dark:bg-zinc-950'}`}>{completed ? '✓' : '·'}</button></div>;
                   })}
                 </div>
               ))}
