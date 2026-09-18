@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { computeHevyCalculations } from '@/lib/fitness/hevy/calculations';
+import { useCallback, useEffect, useState } from 'react';
 import {
   listMuscleTargets,
   upsertMuscleTarget,
@@ -10,21 +9,18 @@ import {
 import { MUSCLES } from '@/lib/fitness/hevy/muscle-data';
 
 /**
- * MuscleTargetsEditor — full per-muscle targets + notes.
+ * MuscleTargetsEditor — "Per-muscle target frequency".
  *
- * Stage 5 §12:
- *   - Each muscle has a target sessions/week entry.
- *   - Each muscle can have a free-form note.
- *   - Notes are USER context; no automated rewrite.
- *
- * Behaviour:
- *   - Loads existing targets + computed summaries; pre-fills the form
- *     with whatever is stored, defaulting to 2×/wk when no row exists.
- *   - Per-row Save button writes only that muscle.
- *   - "Apply to all" bulk-saves the current form values for any
- *     muscle whose row is dirty.
- *   - Each save recomputes the engine so any badge consuming the
- *     status updates without a remount.
+ * Progressive disclosure (Stage 5 §12 behaviour preserved):
+ *   - The page shows ONE master control: "Train each muscle: [N]× per
+ *     week" + **Apply to All** (writes every muscle in one go).
+ *   - **Manually Select** opens a modal listing every muscle with its
+ *     own weekly target + optional note. Editing there is draft-only;
+ *     nothing is written until **Save**. Closing/cancelling discards
+ *     the draft, so values can never be modified accidentally.
+ *   - Each muscle keeps its own stored row (1×/wk for Legs while
+ *     Chest runs 2×/wk still works); notes remain user context that
+ *     no automated flow rewrites.
  */
 
 interface DraftRow {
@@ -40,42 +36,34 @@ export default function MuscleTargetsEditor({
   userId: string;
   refreshKey: number;
 }) {
-  const [drafts, setDrafts] = useState<DraftRow[]>([]);
   const [stored, setStored] = useState<HevyMuscleTarget[]>([]);
-  const [statusByMuscle, setStatusByMuscle] = useState<
-    Record<string, 'on' | 'below' | 'above' | null>
-  >({});
+  const [masterValue, setMasterValue] = useState(2);
   const [loading, setLoading] = useState(true);
-  const [savingMuscle, setSavingMuscle] = useState<string | null>(null);
   const [savingAll, setSavingAll] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<number>(0);
+  const [savedAt, setSavedAt] = useState(0);
+  const [modalOpen, setModalOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const [list, calcs] = await Promise.all([
-        listMuscleTargets(userId),
-        computeHevyCalculations(userId),
-      ]);
+      const list = await listMuscleTargets(userId);
       if (cancelled) return;
       setStored(list);
-      const storedByMuscle = new Map(list.map((t) => [t.muscle, t]));
-      // Show every canonical muscle; pre-fill from stored or default.
-      const drafts: DraftRow[] = MUSCLES.map((m) => {
-        const t = storedByMuscle.get(m);
-        return {
-          muscle: m,
-          sessions: t?.targetSessionsPerWeek ?? 2,
-          notes: t?.notes ?? '',
-        };
-      });
-      setDrafts(drafts);
-      const next: Record<string, 'on' | 'below' | 'above' | null> = {};
-      for (const ms of calcs.muscles) {
-        next[ms.muscle] = ms.onTarget;
+      // Master control mirrors the most common stored value (falls
+      // back to 2× — the module default) so Apply to All starts from
+      // something sensible.
+      if (list.length > 0) {
+        const counts = new Map<number, number>();
+        for (const t of list) {
+          counts.set(
+            t.targetSessionsPerWeek,
+            (counts.get(t.targetSessionsPerWeek) ?? 0) + 1,
+          );
+        }
+        const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+        setMasterValue(dominant || 2);
       }
-      setStatusByMuscle(next);
       setLoading(false);
     })();
     return () => {
@@ -83,112 +71,242 @@ export default function MuscleTargetsEditor({
     };
   }, [userId, refreshKey]);
 
+  /** Reflect freshly saved rows back into the editor (post-save). */
+  const refreshStored = useCallback(async () => {
+    setStored(await listMuscleTargets(userId));
+    setSavedAt(Date.now());
+  }, [userId]);
+
+  async function applyToAll() {
+    setSavingAll(true);
+    for (const muscle of MUSCLES) {
+      await upsertMuscleTarget(userId, muscle, {
+        targetSessionsPerWeek: masterValue,
+        notes: undefined, // preserve each muscle's existing note
+      });
+    }
+    await refreshStored();
+    setSavingAll(false);
+  }
+
+  if (loading) {
+    return (
+      <div className="flex h-24 items-center justify-center text-xs text-zinc-500">
+        Loading targets…
+      </div>
+    );
+  }
+
+  const customCount = stored.filter(
+    (t) => t.targetSessionsPerWeek !== masterValue,
+  ).length;
+
+  return (
+    <div>
+      <header className="mb-4">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+          Per-muscle target frequency
+        </div>
+        <h2 className="mt-1 text-base font-semibold text-zinc-100">
+          How often do you want to train each muscle?
+        </h2>
+        <p className="mt-1 text-[11px] text-zinc-500">
+          Drives the &quot;On target / Below / Above&quot; badges on the
+          Training Frequency page. Notes stay private to you.
+        </p>
+      </header>
+
+      {/* Master control */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-zinc-800/40 bg-zinc-900/30 p-4">
+        <span className="text-sm font-medium text-zinc-100">
+          Train each muscle:
+        </span>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            inputMode="decimal"
+            step="0.5"
+            min="0"
+            value={masterValue}
+            onChange={(e) =>
+              setMasterValue(Math.max(0, Number(e.target.value) || 0))
+            }
+            className="w-16 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-right text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+          />
+          <span className="text-sm text-zinc-400">× per week</span>
+        </div>
+        <button
+          onClick={applyToAll}
+          disabled={savingAll}
+          className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {savingAll ? 'Applying…' : 'Apply to All'}
+        </button>
+        {savedAt > 0 && (
+          <span className="text-[10px] text-emerald-300">Saved</span>
+        )}
+      </div>
+
+      {/* Manual per-muscle editing */}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-zinc-800/60 bg-zinc-950/30 px-4 py-3">
+        <div>
+          <div className="text-sm font-medium text-zinc-100">
+            Manually Select
+          </div>
+          <div className="text-[11px] text-zinc-500">
+            {stored.length === 0
+              ? 'No custom targets yet — every muscle uses its own stored value or the default.'
+              : customCount === 0
+                ? 'All muscles share the master value.'
+                : `${customCount} muscle${customCount === 1 ? '' : 's'} with a custom target.`}
+          </div>
+        </div>
+        <button
+          onClick={() => setModalOpen(true)}
+          className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
+        >
+          Manually Select
+        </button>
+      </div>
+
+      {modalOpen && (
+        <ManualTargetsModal
+          userId={userId}
+          stored={stored}
+          onClose={() => setModalOpen(false)}
+          onSaved={() => void refreshStored()}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Manual per-muscle modal ───────────────────────────────────────
+
+function ManualTargetsModal({
+  userId,
+  stored,
+  onClose,
+  onSaved,
+}: {
+  userId: string;
+  stored: HevyMuscleTarget[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  // Draft state seeded from stored values — edits live ONLY here
+  // until Save is pressed, so closing without saving never touches
+  // the DB.
+  const [drafts, setDrafts] = useState<DraftRow[]>(() =>
+    MUSCLES.map((m) => {
+      const t = stored.find((s) => s.muscle === m);
+      return {
+        muscle: m,
+        sessions: t?.targetSessionsPerWeek ?? 2,
+        notes: t?.notes ?? '',
+      };
+    }),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   function updateDraft(muscle: string, patch: Partial<DraftRow>) {
     setDrafts((rows) =>
       rows.map((r) => (r.muscle === muscle ? { ...r, ...patch } : r)),
     );
   }
 
-  async function saveOne(muscle: string) {
-    const row = drafts.find((r) => r.muscle === muscle);
-    if (!row) return;
-    setSavingMuscle(muscle);
-    const ok = await upsertMuscleTarget(userId, muscle, {
-      targetSessionsPerWeek: row.sessions,
-      notes: row.notes.trim() === '' ? null : row.notes.trim(),
-    });
-    if (ok) {
-      const calcs = await computeHevyCalculations(userId);
-      const next: Record<string, 'on' | 'below' | 'above' | null> = {};
-      for (const ms of calcs.muscles) {
-        next[ms.muscle] = ms.onTarget;
-      }
-      setStatusByMuscle(next);
-      setStored(await listMuscleTargets(userId));
-      setLastSavedAt(Date.now());
-    }
-    setSavingMuscle(null);
-  }
-
-  async function saveAll() {
-    setSavingAll(true);
+  async function save() {
+    setSaving(true);
+    setError(null);
     for (const row of drafts) {
-      await upsertMuscleTarget(userId, row.muscle, {
+      const ok = await upsertMuscleTarget(userId, row.muscle, {
         targetSessionsPerWeek: row.sessions,
         notes: row.notes.trim() === '' ? null : row.notes.trim(),
       });
+      if (!ok) {
+        setError('Some rows failed to save — check the console and retry.');
+        setSaving(false);
+        return;
+      }
     }
-    const calcs = await computeHevyCalculations(userId);
-    const next: Record<string, 'on' | 'below' | 'above' | null> = {};
-    for (const ms of calcs.muscles) {
-      next[ms.muscle] = ms.onTarget;
-    }
-    setStatusByMuscle(next);
-    setStored(await listMuscleTargets(userId));
-    setLastSavedAt(Date.now());
-    setSavingAll(false);
+    setSaving(false);
+    onSaved();
+    onClose();
   }
 
-  function isDirty(row: DraftRow): boolean {
-    const t = stored.find((s) => s.muscle === row.muscle);
-    if (!t) return row.sessions !== 2 || (row.notes.trim() !== '');
-    return (
-      row.sessions !== t.targetSessionsPerWeek ||
-      (row.notes.trim() || null) !== (t.notes ?? null)
-    );
-  }
+  // Close on Escape (treated as cancel — drafts are discarded).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   return (
-    <div>
-      <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Per-muscle targets
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Per-muscle target frequencies"
+    >
+      <div
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div className="relative flex h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-5 py-4">
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-100">
+              Set frequency per muscle
+            </h2>
+            <p className="text-[11px] text-zinc-500">
+              Weekly target per muscle. Nothing saves until you press
+              Save — closing discards changes.
+            </p>
           </div>
-          <h2 className="mt-1 text-base font-semibold text-zinc-100">
-            How often do you want to train each muscle?
-          </h2>
-          <p className="mt-1 text-[11px] text-zinc-500">
-            Each row is independent — e.g. Legs can stay at 1×/wk for
-            football / sprint reasons while Chest targets 2×/wk.
-            Notes are private; no automated process will rewrite them.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {lastSavedAt > 0 && (
-            <span className="text-[10px] text-emerald-300">Saved</span>
-          )}
           <button
-            onClick={saveAll}
-            disabled={savingAll || loading}
-            className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:opacity-40"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            aria-label="Close"
           >
-            {savingAll ? 'Applying…' : 'Apply to all'}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
           </button>
-        </div>
-      </header>
+        </header>
 
-      {loading ? (
-        <div className="flex h-32 items-center justify-center text-xs text-zinc-500">
-          Loading…
-        </div>
-      ) : (
-        <ul className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {drafts.map((row) => {
-            const status = statusByMuscle[row.muscle] ?? null;
-            return (
-              <li
-                key={row.muscle}
-                className="rounded-xl border border-zinc-800/40 bg-zinc-900/30 p-3"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
+        {/* Scrollable muscle list */}
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <ul className="space-y-2.5">
+            {drafts.map((row) => {
+              const storedRow = stored.find((s) => s.muscle === row.muscle);
+              const dirty =
+                row.sessions !== (storedRow?.targetSessionsPerWeek ?? 2) ||
+                (row.notes.trim() || null) !== (storedRow?.notes ?? null);
+              return (
+                <li
+                  key={row.muscle}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800/40 bg-zinc-900/30 px-3 py-2.5"
+                >
+                  <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-zinc-100">
                       {row.muscle}
                     </div>
-                    <StatusBadge status={status} />
+                    <input
+                      type="text"
+                      value={row.notes}
+                      onChange={(e) =>
+                        updateDraft(row.muscle, { notes: e.target.value })
+                      }
+                      placeholder="Optional note (e.g. &quot;Keep lower — football.&quot;)"
+                      className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900/40 px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-zinc-600 focus:outline-none"
+                    />
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <input
                       type="number"
                       inputMode="decimal"
@@ -197,70 +315,50 @@ export default function MuscleTargetsEditor({
                       value={row.sessions}
                       onChange={(e) =>
                         updateDraft(row.muscle, {
-                          sessions: Number(e.target.value) || 0,
+                          sessions: Math.max(0, Number(e.target.value) || 0),
                         })
                       }
                       className="w-16 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                     />
                     <span className="text-[10px] text-zinc-500">×/wk</span>
-                    <button
-                      onClick={() => saveOne(row.muscle)}
-                      disabled={
-                        savingMuscle === row.muscle || !isDirty(row)
-                      }
-                      className="rounded-md bg-rose-600 px-3 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {savingMuscle === row.muscle ? '…' : 'Save'}
-                    </button>
+                    {dirty && (
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-rose-500"
+                        title="Unsaved change"
+                      />
+                    )}
                   </div>
-                </div>
-                <textarea
-                  rows={1}
-                  value={row.notes}
-                  onChange={(e) =>
-                    updateDraft(row.muscle, { notes: e.target.value })
-                  }
-                  placeholder="Optional note (e.g. &quot;Keep lower because of football.&quot;)"
-                  className="mt-2 w-full rounded-md border border-zinc-800 bg-zinc-900/40 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-zinc-600 focus:outline-none"
-                />
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
 
-function StatusBadge({
-  status,
-}: {
-  status: 'on' | 'below' | 'above' | null;
-}) {
-  if (status === null) {
-    return (
-      <span className="text-[10px] uppercase tracking-wider text-zinc-600">
-        —
-      </span>
-    );
-  }
-  if (status === 'on') {
-    return (
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-        · on target
-      </span>
-    );
-  }
-  if (status === 'below') {
-    return (
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-        · below
-      </span>
-    );
-  }
-  return (
-    <span className="text-[10px] font-semibold uppercase tracking-wider text-sky-300">
-      · above
-    </span>
+        <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-zinc-800 px-5 py-3">
+          {error ? (
+            <span className="text-xs text-amber-300">{error}</span>
+          ) : (
+            <span className="text-[11px] text-zinc-500">
+              Changes apply to the Training Frequency badges on save.
+            </span>
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
   );
 }

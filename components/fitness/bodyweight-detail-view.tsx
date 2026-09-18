@@ -9,15 +9,20 @@ import {
   deleteWeightEntry,
   getWeightTarget,
   setWeightTarget,
+  computeWeightProgress,
 } from '@/lib/fitness/weight';
-import { computeWeightProgress } from '@/lib/fitness/weight';
+import {
+  listPhysiquePhotos,
+  pickFeaturedPhoto,
+  pickLatestPinnedCover,
+  type HydratedPhoto,
+} from '@/lib/fitness/physique';
 import type { WeightEntry, WeightTarget } from '@/lib/fitness/types';
 import {
   fmtKg,
   fmtLongDate,
   twelveWeekMovingAverage,
 } from '@/lib/fitness/format';
-import PhysiqueProgress from '@/components/fitness/physique-progress';
 
 // `recharts` is ~300 KB — load it lazily so the page shell, photos and
 // stats paint before the chart downloads.
@@ -63,9 +68,11 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
   const [targetKg, setTargetKg] = useState('90');
   const [targetNotes, setTargetNotes] = useState('');
 
-  // Bumped after a physique photo upload so the progress surface
-  // refetches and shows the new session in the timeline / gallery.
-  const [physiqueRefreshKey, setPhysiqueRefreshKey] = useState(0);
+  // Latest physique snapshot (single small image).
+  const [snapshot, setSnapshot] = useState<HydratedPhoto | null>(null);
+
+  // Bumped after a physique photo upload so the snapshot refetches.
+  const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -76,13 +83,30 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
     setEntries(es);
     setTarget(t);
     if (t?.target_kg) setTargetKg(String(t.target_kg));
-    if (t?.notes) setTargetNotes(t.notes);
     setLoading(false);
   }, [userId]);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Latest physique snapshot — newest session cover (pinned cover →
+  // featured → newest), newest 24 rows so we never sign the whole
+  // library. Shown as ONE small image; the full gallery lives behind
+  // it (link to the physique surface on this page's photo section).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const photos = await listPhysiquePhotos(userId, { limit: 24 });
+      if (cancelled) return;
+      const latest =
+        pickLatestPinnedCover(photos) ?? pickFeaturedPhoto(photos) ?? null;
+      setSnapshot(latest);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, snapshotRefreshKey]);
 
   const sortedAsc = useMemo(
     () =>
@@ -96,6 +120,15 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
     () => computeWeightProgress(sortedAsc, target),
     [sortedAsc, target],
   );
+
+  // Delta vs the previous recorded entry — shown here (not on the
+  // Overview) so the dashboard stays light.
+  const deltaPrevKg = useMemo(() => {
+    if (sortedAsc.length < 2) return null;
+    const curr = sortedAsc[sortedAsc.length - 1].weight_kg;
+    const prev = sortedAsc[sortedAsc.length - 2].weight_kg;
+    return Math.round((curr - prev) * 10) / 10;
+  }, [sortedAsc]);
 
   const maSeries = useMemo(
     () =>
@@ -160,6 +193,12 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
     }
   }
 
+  // Snapshot refresh after physique work happens via the gallery on
+  // the physique surface; bumping the key refetches the latest photo.
+  function refreshSnapshot() {
+    setSnapshotRefreshKey((k) => k + 1);
+  }
+
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
       <Link
@@ -180,20 +219,69 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
         </p>
       </header>
 
-      {/* ── Physique photos: latest, timeline, gallery, upload ── */}
-      <PhysiqueProgress
-        userId={userId}
-        refreshKey={physiqueRefreshKey}
-        onSaved={() => setPhysiqueRefreshKey((k) => k + 1)}
-      />
+      {/* ── Latest physique snapshot: ONE small image ────────── */}
+      <section className="mb-6 flex flex-wrap items-center gap-4 rounded-2xl border border-zinc-800/40 bg-zinc-950/40 p-4">
+        {snapshot?.url ? (
+          <a
+            href={snapshot.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="group block w-28 shrink-0 overflow-hidden rounded-xl border border-zinc-800/40 bg-zinc-900 sm:w-32"
+            aria-label="Open latest progress photo full-size"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={snapshot.url}
+              alt={`Latest progress — ${snapshot.taken_at}`}
+              className="aspect-[3/4] w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+              loading="lazy"
+              decoding="async"
+            />
+          </a>
+        ) : (
+          <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-xl border border-dashed border-zinc-800/60 bg-zinc-950/30 text-[10px] text-zinc-600 sm:w-32">
+            No photo yet
+          </div>
+        )}
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
+            Physique
+          </div>
+          <div className="mt-0.5 text-sm font-medium text-zinc-100">
+            {snapshot
+              ? snapshot.session_title ?? snapshot.taken_at
+              : 'No progress photos yet'}
+          </div>
+          <div className="mt-0.5 text-[11px] text-zinc-500">
+            {snapshot
+              ? `${snapshot.pose_type ?? 'Photo'} · ${snapshot.taken_at}`
+              : 'Upload one from the Overview or gallery.'}
+          </div>
+          <button
+            type="button"
+            onClick={refreshSnapshot}
+            className="mt-2 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+          >
+            Refresh
+          </button>
+        </div>
+      </section>
       <div className="mb-8" />
 
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Stat
           label="Current"
           value={
             sortedAsc.length > 0
               ? fmtKg(sortedAsc[sortedAsc.length - 1].weight_kg, true)
+              : '—'
+          }
+        />
+        <Stat
+          label="Δ previous"
+          value={
+            deltaPrevKg !== null
+              ? `${deltaPrevKg > 0 ? '+' : ''}${fmtKg(deltaPrevKg)} kg`
               : '—'
           }
         />

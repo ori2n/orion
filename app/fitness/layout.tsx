@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import type { Metadata } from 'next';
 import { getCurrentUserIdServer } from '@/lib/auth-server';
-import { FitnessSubnav } from '@/components/fitness/fitness-subnav';
+import { FitnessBrowseNav } from '@/components/fitness/fitness-browse-nav';
 import { FitnessChromeTop } from '@/components/fitness/fitness-chrome-top';
 
 /**
@@ -11,9 +11,8 @@ import { FitnessChromeTop } from '@/components/fitness/fitness-chrome-top';
  *     rendered here; we redirect to /login so the dashboard never has
  *     to care about it. Each child page can call the same server
  *     helper to fetch its own data.
- *
- *   - Provides the shared chrome (SYSTEM badge + date/time watermark)
- *     and the in-module sub-nav that links the deep pages together.
+ *   *   - Provides the shared chrome (SYSTEM badge + date/time watermark)
+ *     and the Browse navigation module shown on every Fitness page.
  *
  * The layout intentionally does NOT own data fetching — each page
  * loads its own slice of the data it needs (Stage 5 perf principle:
@@ -65,10 +64,14 @@ export default async function FitnessLayout({
         }}
       />
       <FitnessChromeTop />
-      <FitnessSubnav />
+      {/* Primary module navigation — the Browse hub replaces the old
+          tab bar and appears once, in the same position, on every
+          Fitness page. */}
+      <div className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-4 sm:px-6 sm:pt-6">
+        <FitnessBrowseNav />
+      </div>
       {/* No overflow here — the page scrolls with the body so vertical
-          swipes work naturally from anywhere in the content area. The
-          sticky sub-nav above stays pinned below the app header. */}
+          swipes work naturally from anywhere in the content area. */}
       <main className="relative z-10 flex flex-1 flex-col">
         {children}
       </main>
