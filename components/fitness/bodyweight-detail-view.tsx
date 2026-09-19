@@ -17,6 +17,7 @@ import {
   pickLatestPinnedCover,
   type HydratedPhoto,
 } from '@/lib/fitness/physique';
+import PhysiqueGallery from '@/components/fitness/physique-gallery';
 import type { WeightEntry, WeightTarget } from '@/lib/fitness/types';
 import {
   fmtKg,
@@ -74,6 +75,12 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
   // Bumped after a physique photo upload so the snapshot refetches.
   const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0);
 
+  // Full physique gallery — the pre-remake album library.
+  const [galleryOpen, setGalleryOpen] = useState(false);
+
+  // Full photo list backing the gallery (fetched without a limit).
+  const [photos, setPhotos] = useState<HydratedPhoto[]>([]);
+
   const reload = useCallback(async () => {
     setLoading(true);
     const [es, t] = await Promise.all([
@@ -90,23 +97,41 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
     void reload();
   }, [reload]);
 
-  // Latest physique snapshot — newest session cover (pinned cover →
-  // featured → newest), newest 24 rows so we never sign the whole
-  // library. Shown as ONE small image; the full gallery lives behind
-  // it (link to the physique surface on this page's photo section).
+  // Physique photos — fetched without a limit so the gallery sees the
+  // whole library. The newest session cover doubles as the small
+  // snapshot image in the Physique card (pinned cover → featured →
+  // newest), exactly like the pre-remake dashboard surface.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const photos = await listPhysiquePhotos(userId, { limit: 24 });
+      const list = await listPhysiquePhotos(userId);
       if (cancelled) return;
+      setPhotos(list);
       const latest =
-        pickLatestPinnedCover(photos) ?? pickFeaturedPhoto(photos) ?? null;
+        pickLatestPinnedCover(list) ?? pickFeaturedPhoto(list) ?? null;
       setSnapshot(latest);
     })();
     return () => {
       cancelled = true;
     };
   }, [userId, snapshotRefreshKey]);
+
+  // Optimistic-update pipeline shared with the gallery (star / cover /
+  // album edits mutate locally, then reconcile with Supabase).
+  const applyPhotosChange = useCallback(
+    (updater: (prev: HydratedPhoto[]) => HydratedPhoto[]) => {
+      setPhotos(updater);
+    },
+    [],
+  );
+
+  // Keep the small snapshot in sync when the gallery edits covers/
+  // favourites/albums so the card never shows a stale photo.
+  useEffect(() => {
+    const latest =
+      pickLatestPinnedCover(photos) ?? pickFeaturedPhoto(photos) ?? null;
+    setSnapshot(latest);
+  }, [photos]);
 
   const sortedAsc = useMemo(
     () =>
@@ -219,51 +244,61 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
         </p>
       </header>
 
-      {/* ── Latest physique snapshot: ONE small image ────────── */}
-      <section className="mb-6 flex flex-wrap items-center gap-4 rounded-2xl border border-zinc-800/40 bg-zinc-950/40 p-4">
-        {snapshot?.url ? (
-          <a
-            href={snapshot.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="group block w-28 shrink-0 overflow-hidden rounded-xl border border-zinc-800/40 bg-zinc-900 sm:w-32"
-            aria-label="Open latest progress photo full-size"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={snapshot.url}
-              alt={`Latest progress — ${snapshot.taken_at}`}
-              className="aspect-[3/4] w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-              loading="lazy"
-              decoding="async"
-            />
-          </a>
-        ) : (
-          <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-xl border border-dashed border-zinc-800/60 bg-zinc-950/30 text-[10px] text-zinc-600 sm:w-32">
-            No photo yet
-          </div>
-        )}
-        <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
-            Physique
-          </div>
-          <div className="mt-0.5 text-sm font-medium text-zinc-100">
-            {snapshot
-              ? snapshot.session_title ?? snapshot.taken_at
-              : 'No progress photos yet'}
-          </div>
-          <div className="mt-0.5 text-[11px] text-zinc-500">
-            {snapshot
-              ? `${snapshot.pose_type ?? 'Photo'} · ${snapshot.taken_at}`
-              : 'Upload one from the Overview or gallery.'}
-          </div>
+      {/* ── Physique: snapshot + gallery entry (pre-remake behaviour) ── */}
+      <section className="mb-6 rounded-2xl border border-zinc-800/40 bg-zinc-950/40 p-4">
+        <div className="flex flex-wrap items-center gap-4">
           <button
             type="button"
-            onClick={refreshSnapshot}
-            className="mt-2 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+            onClick={() => setGalleryOpen(true)}
+            className="group block w-28 shrink-0 overflow-hidden rounded-xl border border-zinc-800/40 bg-zinc-900 text-left transition-transform duration-300 hover:scale-[1.03] sm:w-32"
+            aria-label="Open physique gallery"
           >
-            Refresh
+            {snapshot?.url ? (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img
+                src={snapshot.url}
+                alt={`Latest progress — ${snapshot.taken_at}`}
+                className="aspect-[3/4] w-full object-cover"
+                loading="lazy"
+                decoding="async"
+              />
+            ) : (
+              <span className="flex h-24 items-center justify-center text-[10px] text-zinc-600">
+                No photo yet
+              </span>
+            )}
           </button>
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500">
+              Physique
+            </div>
+            <div className="mt-0.5 text-sm font-medium text-zinc-100">
+              {snapshot
+                ? snapshot.session_title ?? snapshot.taken_at
+                : 'No progress photos yet'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-zinc-500">
+              {snapshot
+                ? `${snapshot.pose_type ?? 'Photo'} · ${snapshot.taken_at}`
+                : 'Add one from the Overview, then browse it here.'}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setGalleryOpen(true)}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+              >
+                Open Gallery
+              </button>
+              <button
+                type="button"
+                onClick={refreshSnapshot}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
         </div>
       </section>
       <div className="mb-8" />
@@ -457,6 +492,20 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
           </button>
         </div>
       </section>
+
+      {/* ── Physique gallery modal (pre-remake album library) ───── */}
+      {galleryOpen && (
+        <PhysiqueGallery
+          photos={photos}
+          userId={userId}
+          applyPhotosChange={applyPhotosChange}
+          onChange={refreshSnapshot}
+          showToast={(text) => {
+            console.warn('[bodyweight] physique gallery:', text);
+          }}
+          onClose={() => setGalleryOpen(false)}
+        />
+      )}
 
       <section className="rounded-2xl border border-zinc-800/40 bg-zinc-950/40 p-4">
         <header className="mb-3 flex items-baseline justify-between gap-3">
