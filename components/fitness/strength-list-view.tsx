@@ -192,8 +192,8 @@ export default function StrengthListView({ calcs }: { calcs: HevyCalculations })
 
 /** The four featured exercises, in display order. */
 const FEATURED_EXERCISES = [
-  'Incline Dumbbell Bench',
-  'Chest Fly',
+  'Incline Chest Press',
+  'Dumbbell Shoulder Press',
   'Lat Pulldown',
   'Isolateral Row',
 ] as const;
@@ -234,20 +234,26 @@ function findFeatured(
 }
 
 /**
- * Three broad groups (per spec) replacing the per-muscle listing as
- * the primary structure. Each group funnels into the All view's
- * per-muscle drill-down, which in turn reaches every exercise page.
+ * Exercise categories on the Rank screen. Clicking one opens an
+ * in-page modal listing every mapped exercise in the category — no
+ * routing. (The per-muscle drill-down pages 404 for muscles with no
+ * training data yet, so category browsing must not depend on them.)
  */
 const EXERCISE_GROUPS: Array<{
   label: string;
-  /** Canonical muscles included in the group. */
+  /** Canonical muscles included in the category. */
   muscles: string[];
   blurb: string;
 }> = [
   {
-    label: 'Chest & Back',
-    muscles: ['Chest', 'Upper Back', 'Lats', 'Lower Back'],
-    blurb: 'Presses, pulls, rows and pulldowns.',
+    label: 'Chest',
+    muscles: ['Chest'],
+    blurb: 'Presses, flies and push-ups.',
+  },
+  {
+    label: 'Back',
+    muscles: ['Upper Back', 'Lats', 'Lower Back'],
+    blurb: 'Rows, pulldowns and extensions.',
   },
   {
     label: 'Shoulders & Arms',
@@ -262,6 +268,8 @@ const EXERCISE_GROUPS: Array<{
 ];
 
 function FeaturedDashboard({ exercises }: { exercises: ExerciseSummary[] }) {
+  /** Open category modal (label), or null when the Rank screen is clean. */
+  const [category, setCategory] = useState<string | null>(null);
   const featured = useMemo(
     () =>
       FEATURED_EXERCISES.map((name) => ({
@@ -307,17 +315,19 @@ function FeaturedDashboard({ exercises }: { exercises: ExerciseSummary[] }) {
         </div>
       </section>
 
-      {/* Three broad groups */}
+      {/* Exercise categories — clicking opens the in-page modal (no
+          routing: the per-muscle pages 404 without training data). */}
       <section>
         <h2 className="mb-3 text-sm font-semibold tracking-tight text-zinc-100">
-          Browse by group
+          Browse by category
         </h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {groups.map((g) => (
-            <Link
+            <button
               key={g.label}
-              href={`/fitness/strength/all?group=${encodeURIComponent(g.label)}`}
-              className="group rounded-xl border border-zinc-800/40 bg-zinc-950/40 p-4 transition-colors hover:border-zinc-700 hover:bg-zinc-900/40"
+              type="button"
+              onClick={() => setCategory(g.label)}
+              className="group rounded-xl border border-zinc-800/40 bg-zinc-950/40 p-4 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900/40"
             >
               <div className="flex items-center justify-between">
                 <div className="text-sm font-medium text-zinc-100 group-hover:text-white">
@@ -328,10 +338,132 @@ function FeaturedDashboard({ exercises }: { exercises: ExerciseSummary[] }) {
                 </span>
               </div>
               <div className="mt-1 text-[11px] text-zinc-500">{g.blurb}</div>
-            </Link>
+            </button>
           ))}
         </div>
       </section>
+
+      {/* Category exercise list — modal over the Rank screen. */}
+      {category && (
+        <CategoryModal
+          label={category}
+          group={EXERCISE_GROUPS.find((g) => g.label === category)!}
+          exercises={exercises}
+          onClose={() => setCategory(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Category modal (in-page exercise browser) ───────────────────
+
+/**
+ * CategoryModal — lists every exercise in a category inside a modal
+ * over the Rank screen. Rows deep-link to the existing per-exercise
+ * drill-down pages, so each entry opens its real Rank data and
+ * progression graph. Pure in-memory filtering of the summaries the
+ * page already computed — no extra fetching, no duplicate data.
+ */
+function CategoryModal({
+  label,
+  group,
+  exercises,
+  onClose,
+}: {
+  label: string;
+  group: (typeof EXERCISE_GROUPS)[number];
+  exercises: ExerciseSummary[];
+  onClose: () => void;
+}) {
+  const rows = useMemo(
+    () =>
+      exercises
+        .filter((e) => e.muscle !== null && group.muscles.includes(e.muscle))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [exercises, group],
+  );
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${label} exercises`}
+    >
+      <div
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div className="relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60 sm:rounded-2xl">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-5 py-4">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+              {label}
+            </div>
+            <h3 className="mt-0.5 text-base font-semibold tracking-tight text-zinc-100">
+              Exercises
+            </h3>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {rows.length} exercise{rows.length === 1 ? '' : 's'} · tap one for its
+              progression graph
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            aria-label="Back to Rank screen"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </header>
+        <div className="flex-1 overflow-y-auto p-4">
+          {rows.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-zinc-800 px-4 py-10 text-center text-sm text-zinc-500">
+              No exercises logged in {label} yet — import a Hevy export in
+              Manage Data to populate this category.
+            </p>
+          ) : (
+            <ul className="grid grid-cols-1 gap-2">
+              {rows.map((ex) => (
+                <li key={ex.name}>
+                  <Link
+                    href={`/fitness/strength/${encodeURIComponent(ex.name)}`}
+                    className="group flex items-center justify-between gap-2 rounded-lg border border-zinc-800/40 bg-zinc-900/40 px-3 py-2 transition-colors hover:border-zinc-700 hover:bg-zinc-900/60"
+                  >
+                    <div className="min-w-0">
+                      <div className="line-clamp-1 text-sm font-medium text-zinc-100 group-hover:text-white">
+                        {ex.name}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">
+                        {ex.muscle} · Last: {fmtRelativeDate(ex.lastTrained)}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="font-mono text-sm text-zinc-100">
+                        {fmtKg(ex.heaviestWeightKg, true)}
+                      </div>
+                      <div className="text-[9px] text-zinc-500">PR</div>
+                    </div>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

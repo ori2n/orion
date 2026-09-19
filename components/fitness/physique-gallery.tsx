@@ -16,6 +16,7 @@ import {
   applySessionTitle,
   applySessionText,
   applyDeletePhoto,
+  applyNewSession,
   type SupabaseFailure,
   type HydratedPhoto,
   type PhysiqueSession,
@@ -24,6 +25,7 @@ import {
 } from '@/lib/fitness/physique';
 import { logEvent, EventTypes } from '@/lib/events';
 import PhysiqueComparison from './physique-comparison';
+import PhysiqueUploadFlow from './physique-upload-flow';
 
 type Filter = 'all' | 'starred';
 type Mode = 'library' | 'album';
@@ -128,6 +130,14 @@ export default function PhysiqueGallery({
   const [viewer, setViewer] = useState<HydratedPhoto | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyDate, setBusyDate] = useState<string | null>(null);
+  /**
+   * Session-first add flow (the pre-remake "Add Session" entry).
+   * Renders `PhysiqueUploadFlow` inline inside the gallery modal so
+   * the user can create a new session without first closing the
+   * gallery and hunting for the dashboard's upload button. While
+   * open, the library grid is replaced so the flow has full height.
+   */
+  const [addSessionOpen, setAddSessionOpen] = useState(false);
 
   // Seeded once on mount by the dashboard's Quick-compare button.
   useEffect(() => {
@@ -161,11 +171,13 @@ export default function PhysiqueGallery({
     }
   }, [sessions, currentSession]);
 
-  // Escape: close modal → exit compare → close cover-pick → close viewer (in order).
+  // Escape: close modal → exit add-session flow → exit compare → close
+  // cover-pick → close viewer → exit album (in order).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
       if (viewer) setViewer(null);
+      else if (addSessionOpen) setAddSessionOpen(false);
       else if (comparing) setComparing(false);
       else if (coverPickOpen) setCoverPickOpen(false);
       else if (mode === 'album') setMode('library');
@@ -173,7 +185,7 @@ export default function PhysiqueGallery({
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, viewer, comparing, coverPickOpen, mode]);
+  }, [onClose, viewer, comparing, coverPickOpen, mode, addSessionOpen]);
 
   const filteredSessions = useMemo(() => {
     let result = sessions;
@@ -421,6 +433,36 @@ export default function PhysiqueGallery({
     setCurrentSession(null);
   }
 
+  /**
+   * A new session (or extra photos appended to an existing one) was
+   * created by the inline upload flow. Optimistically splice the
+   * hydrated rows into the gallery's photo list, then bubble to the
+   * parent so the timeline/snapshot refetch. Opening the album
+   * immediately only makes sense when the user picked TODAY'S date —
+   * any other `taken_at` already had its own session, so we just
+   * drop back to the grid where the new/updated album shows up with
+   * its first uploaded photo as the cover.
+   */
+  async function handleSessionCreated(newPhotos: HydratedPhoto[], takenAt: string) {
+    setAddSessionOpen(false);
+    if (newPhotos.length > 0) {
+      applyPhotosChange?.((prev) => applyNewSession(prev, newPhotos));
+    }
+    onChange?.();
+    const sessionExists = sessions.some((s) => s.taken_at === takenAt);
+    if (!sessionExists) {
+      const created = groupPhotosIntoSessions(newPhotos).find(
+        (s) => s.taken_at === takenAt,
+      );
+      if (created) {
+        openAlbum(created);
+        return;
+      }
+    }
+    setMode('library');
+    setCurrentSession(null);
+  }
+
   // ─── Render ──────────────────────────────────────────────
   return (
     <div
@@ -454,6 +496,45 @@ export default function PhysiqueGallery({
           onFlip={() => setSelected((s) => [...s].reverse())}
           onBack={() => setComparing(false)}
         />
+      ) : addSessionOpen ? (
+        /* Session-first add flow — replaces the library grid while
+           open so the flow has full height (pre-remake behaviour). */
+        <div className="relative z-10 flex h-full w-full flex-col bg-zinc-950">
+          <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-6 py-4">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+                Physique
+              </div>
+              <h2 className="mt-0.5 text-xl font-bold tracking-tight text-zinc-100">
+                Add session
+              </h2>
+              <p className="mt-0.5 text-[11px] text-zinc-500">
+                Pick a date and one or more photos — they become a new
+                album (or join the existing session for that day).
+              </p>
+            </div>
+            <button
+              onClick={() => setAddSessionOpen(false)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              aria-label="Cancel add session"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6L6 18" />
+                <path d="M6 6l12 12" />
+              </svg>
+            </button>
+          </header>
+          <div className="flex-1 overflow-y-auto p-5">
+            <PhysiqueUploadFlow
+              userId={userId}
+              onError={(msg) => showToast?.(msg)}
+              onCancel={() => setAddSessionOpen(false)}
+              onSaved={(created, takenAt) =>
+                void handleSessionCreated(created, takenAt)
+              }
+            />
+          </div>
+        </div>
       ) : mode === 'library' ? (
         <LibraryView
           sessions={filteredSessions}
@@ -471,6 +552,7 @@ export default function PhysiqueGallery({
           onCompare={openComparison}
           onOpenAlbum={openAlbum}
           onClose={onClose}
+          onAddSession={() => setAddSessionOpen(true)}
         />
       ) : currentSession ? (
         <AlbumView
@@ -565,6 +647,7 @@ function LibraryView({
   onCompare,
   onOpenAlbum,
   onClose,
+  onAddSession,
 }: {
   sessions: PhysiqueSession[];
   photosCount: number;
@@ -581,6 +664,7 @@ function LibraryView({
   onCompare: () => void;
   onOpenAlbum: (s: PhysiqueSession) => void;
   onClose: () => void;
+  onAddSession: () => void;
 }) {
   return (
     <div className="relative z-10 flex h-full w-full flex-col bg-zinc-950">
@@ -630,6 +714,17 @@ function LibraryView({
           className="w-64 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-500 focus:outline-none"
         />
         <div className="ml-auto flex items-center gap-3">
+          {/* Restored "Add Session" entry (pre-remake upload flow). */}
+          <button
+            onClick={onAddSession}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
+            aria-label="Add a new progress session"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Add session
+          </button>
           {selected.length > 0 && (
             <button
               onClick={clearSelection}
@@ -639,11 +734,16 @@ function LibraryView({
             </button>
           )}
           {canCompare ? (
+            /* Compact, icon-first compare trigger. The two-photos +
+               arrows glyph reads as "comparison" on mobile where a
+               bare text button (or a bare X) does not. */
             <button
               onClick={onCompare}
-              className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
+              className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
+              aria-label="Compare the two selected photos"
             >
-              Compare photos
+              <CompareIcon />
+              Compare
             </button>
           ) : (
             <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">
@@ -659,7 +759,7 @@ function LibraryView({
         {sessions.length === 0 ? (
           <p className="rounded-xl border border-dashed border-zinc-800 px-4 py-16 text-center text-sm text-zinc-500">
             {photosCount === 0
-              ? 'No photos uploaded yet — open the dashboard and tap "Add Progress".'
+              ? 'No photos yet — tap "Add session" above to create your first one.'
               : 'No albums match your filter.'}
           </p>
         ) : (
@@ -714,12 +814,10 @@ function AlbumCard({
       >
         <div className="relative aspect-square w-full overflow-hidden rounded-lg bg-zinc-900 shadow-lg shadow-black/40">
           {cover?.url ? (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img
+            <GalleryImage
               src={cover.url}
               alt={displayTitle}
               className="h-full w-full object-cover"
-              loading="lazy"
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
@@ -906,22 +1004,25 @@ function AlbumView({
   return (
     <div className="relative z-10 flex h-full w-full flex-col bg-zinc-950">
       {/* Top bar: back button + featured + delete + close */}
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-6 py-3">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3 sm:px-6">
+        {/* Always-visible back pill — returns to the Gallery grid
+            (library view), never all the way out of the modal. */}
         <button
           onClick={onBack}
-          className="flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium text-zinc-300 hover:bg-zinc-800 hover:text-white"
+          className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 py-1.5 pl-2.5 pr-3.5 text-xs font-semibold text-zinc-100 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+          aria-label="Back to the gallery grid"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
-          Back to library
+          Back to gallery
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={() =>
               toggleSelected({ kind: 'session', taken_at: session.taken_at })
             }
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors sm:px-3 ${
               sessionSelSelected
                 ? 'border-rose-500 bg-rose-600 text-white'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
@@ -933,7 +1034,7 @@ function AlbumView({
           <button
             onClick={onFavourite}
             disabled={busy}
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+            className={`hidden items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 sm:flex ${
               session.is_favourited
                 ? 'border-rose-500/60 bg-rose-950/30 text-rose-300 hover:bg-rose-950/50'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
@@ -945,7 +1046,7 @@ function AlbumView({
           <button
             onClick={onDelete}
             disabled={busy}
-            className="rounded-lg border border-red-700/40 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+            className="hidden rounded-lg border border-red-700/40 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/40 disabled:opacity-40 sm:block"
           >
             Delete
           </button>
@@ -963,13 +1064,12 @@ function AlbumView({
               aria-label="Open cover photo full-screen"
             >
               {cover?.url ? (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img
+                <GalleryImage
                   key={`cover-${cover.id}`}
                   src={cover.url}
                   alt={`Album cover ${formatAlbumDate(session.taken_at)}`}
                   className="absolute inset-0 h-full w-full object-cover cover-swap"
-                  loading="lazy"
+                  eager
                 />
               ) : (
                 <div className="flex h-full w-full items-center justify-center text-sm text-zinc-600">
@@ -1202,12 +1302,10 @@ function AlbumPhotoTile({
         aria-label={`View ${label} full-screen`}
       >
         {photo.url ? (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img
+          <GalleryImage
             src={photo.url}
             alt={`Album photo ${label} ${photo.taken_at}`}
             className="h-full w-full object-cover"
-            loading="lazy"
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
@@ -1254,15 +1352,16 @@ function AlbumPhotoTile({
           </button>
           <button
             onClick={onPin}
-            title={isPicked ? 'Unselect for compare' : 'Select for compare'}
-            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+            title={isPicked ? 'On the compare board' : 'Add to compare board'}
+            className={`flex h-6 w-6 items-center justify-center rounded ${
               isPicked
                 ? 'bg-rose-500 text-white'
                 : 'text-zinc-200 hover:bg-zinc-700'
             }`}
-            aria-label="Select for compare"
+            aria-label={isPicked ? 'Remove from compare board' : 'Add to compare board'}
+            aria-pressed={isPicked}
           >
-            {isPicked ? '✓' : '⨯'}
+            {isPicked ? <CheckIcon size={12} /> : <CompareIcon size={12} />}
           </button>
           <button
             onClick={onDelete}
@@ -1413,12 +1512,10 @@ function CoverPickOverlay({
                 aria-label={`Set ${p.pose_type ?? 'photo'} as cover`}
               >
                 {p.url ? (
-                  /* eslint-disable-next-line @next/next/no-img-element */
-                  <img
+                  <GalleryImage
                     src={p.url}
                     alt="Cover candidate"
                     className="h-full w-full object-cover"
-                    loading="lazy"
                   />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center text-xs text-zinc-600">
@@ -1519,6 +1616,103 @@ function CompareOverlay({
 }
 
 // ─── Misc small components ─────────────────────────────────────
+
+/**
+ * Comparison icon — two portrait frames side-by-side with opposing
+ * compare arrows in the gap, mirroring the before/after slider.
+ * Scales with `size`; inherits `currentColor` like every other inline
+ * SVG in the codebase (the project has no icon library).
+ */
+function CompareIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {/* Left photo frame */}
+      <rect x="2" y="4" width="7.5" height="16" rx="1.5" />
+      {/* Right photo frame */}
+      <rect x="14.5" y="4" width="7.5" height="16" rx="1.5" />
+      {/* Comparison arrows crossing the gap between frames */}
+      <path d="M9.5 10.5h5" />
+      <path d="M12.5 8.5l2 2-2 2" />
+      <path d="M14.5 15.5h-5" />
+      <path d="M11.5 13.5l-2 2 2 2" />
+    </svg>
+  );
+}
+
+/**
+ * Gallery image with a skeleton placeholder. Renders a soft zinc
+ * block (with the same aspect ratio as the tile) until the browser
+ * has decoded the image, then crossfades the photo in — no more
+ * "loading…" text or layout jank on slow mobile connections.
+ *
+ * `fetchpriority` stays default (low) so grid images never compete
+ * with the page shell; `decoding="async"` keeps big JPEG decodes off
+ * the main thread.
+ */
+function GalleryImage({
+  src,
+  alt,
+  className = '',
+  eager = false,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+  /** Load immediately (above-the-fold covers) instead of lazily. */
+  eager?: boolean;
+}) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <span className="relative block h-full w-full">
+      {!loaded && (
+        <span
+          aria-hidden
+          className="absolute inset-0 animate-pulse rounded-none bg-zinc-800/80"
+        />
+      )}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={alt}
+        className={`${className} transition-opacity duration-300 ${
+          loaded ? 'opacity-100' : 'opacity-0'
+        }`}
+        loading={eager ? 'eager' : 'lazy'}
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+      />
+    </span>
+  );
+}
+
+/** Small tick used when a photo is already on the compare board. */
+function CheckIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M20 6L9 17l-5-5" />
+    </svg>
+  );
+}
 
 function FilterChip({
   active,

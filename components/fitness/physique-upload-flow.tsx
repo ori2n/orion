@@ -5,6 +5,8 @@ import {
   uploadAndSavePhysiquePhoto,
   updateSessionMetadata,
   setSessionFavourite,
+  setSessionTitle,
+  type HydratedPhoto,
 } from '@/lib/fitness/physique';
 import { logEvent, EventTypes } from '@/lib/events';
 
@@ -12,9 +14,9 @@ import { logEvent, EventTypes } from '@/lib/events';
  * PhysiqueUploadFlow — session-first upload flow.
  *
  * UX (per user spec):
- *   1. Click "Add Progress" → modal opens.
+ *   1. Click "Add Progress" / "Add session" → flow opens.
  *   2. Pick MULTIPLE photos in one go (native file picker, multi).
- *   3. Optional session notes (one textarea for the whole session).
+ *   3. Optional session title + notes (one textarea for the session).
  *   4. Save.
  *
  * Pose labels (Front / Side / Back / …) are intentionally SKIPPED at
@@ -22,13 +24,17 @@ import { logEvent, EventTypes } from '@/lib/events';
  * expanded session view or the gallery's full-screen viewer. This
  * keeps the upload under 30 seconds.
  *
- * Each picked photo becomes its own row in `physique_photos`,
- * sharing the same `taken_at`. After all uploads complete we run one
+ * Each picked photo becomes its own row in `physique_photos`, sharing
+ * the same `taken_at`. After all uploads complete we run one
  * `updateSessionMetadata` call so any session-level data (notes,
  * body weight) is applied to *every* photo of the date — including
  * pre-existing photos that the user is adding to. Pre-existing
  * favourites are preserved: the upload only writes
  * `is_favourited: featured` per-photo on the brand new rows.
+ *
+ * `onSaved` receives the freshly created hydrated rows so a caller
+ * (e.g. the gallery) can splice them straight into its optimistic
+ * state without a refetch.
  */
 export default function PhysiqueUploadFlow({
   userId,
@@ -37,7 +43,8 @@ export default function PhysiqueUploadFlow({
   onCancel,
 }: {
   userId: string;
-  onSaved: () => void;
+  /** Called with the newly created photo rows (in upload order). */
+  onSaved?: (created: HydratedPhoto[], takenAt: string) => void;
   onError: (msg: string) => void;
   onCancel: () => void;
 }) {
@@ -45,6 +52,7 @@ export default function PhysiqueUploadFlow({
   type Pick = { file: File; previewUrl: string };
   const [batch, setBatch] = useState<Pick[]>([]);
   const [takenAt, setTakenAt] = useState(todayISO());
+  const [title, setTitle] = useState('');
   const [bodyWeight, setBodyWeight] = useState('');
   const [notes, setNotes] = useState('');
   const [featured, setFeatured] = useState(false);
@@ -86,7 +94,7 @@ export default function PhysiqueUploadFlow({
   async function handleSubmit() {
     if (batch.length === 0) return;
     setUploading(true);
-    let succeeded = 0;
+    const created: HydratedPhoto[] = [];
     let lastErr: string | null = null;
 
     // Insert all new photos in parallel — pose_type is null at this
@@ -94,7 +102,7 @@ export default function PhysiqueUploadFlow({
     // gallery viewer.
     await Promise.all(
       batch.map(async (row) => {
-        const created = await uploadAndSavePhysiquePhoto({
+        const createdPhoto = await uploadAndSavePhysiquePhoto({
           userId,
           file: row.file,
           taken_at: takenAt,
@@ -103,7 +111,7 @@ export default function PhysiqueUploadFlow({
           notes: null,
           is_favourited: featured,
         });
-        if (created) succeeded += 1;
+        if (createdPhoto) created.push(createdPhoto);
         else lastErr = row.file.name;
       }),
     );
@@ -111,11 +119,15 @@ export default function PhysiqueUploadFlow({
     // Apply session-level fields AFTER the uploads land. We only
     // touch fields the user actually set so pre-existing session
     // notes / body weight / favourites are preserved.
+    const sessionTitle = title.trim() || null;
     const sessionNotes = notes.trim() || null;
     const sessionBw =
       bodyWeight.trim() && !Number.isNaN(parseFloat(bodyWeight))
         ? parseFloat(bodyWeight)
         : null;
+    if (sessionTitle !== null) {
+      await setSessionTitle(userId, takenAt, sessionTitle);
+    }
     if (sessionNotes !== null || sessionBw !== null) {
       await updateSessionMetadata(userId, takenAt, {
         // Only include keys that have a value to write; the helper
@@ -135,9 +147,15 @@ export default function PhysiqueUploadFlow({
       await setSessionFavourite(userId, takenAt, true);
     }
 
+    // Stamp the session title onto the local copies so the caller's
+    // optimistic state renders the named album immediately.
+    const stamped = created.map((p) =>
+      sessionTitle !== null ? { ...p, session_title: sessionTitle } : p,
+    );
+
     setUploading(false);
 
-    if (succeeded === 0) {
+    if (created.length === 0) {
       onError(
         `Failed to upload ${lastErr ? `“${lastErr}”` : 'all photos'}. Check your connection and try again.`,
       );
@@ -147,19 +165,20 @@ export default function PhysiqueUploadFlow({
     void logEvent(EventTypes.SESSION_CREATED, {
       user_id: userId,
       taken_at: takenAt,
-      photo_count: succeeded,
+      photo_count: created.length,
       photo_total: batch.length,
       is_favourited: featured,
+      has_title: sessionTitle !== null,
       has_notes: sessionNotes !== null,
       has_body_weight: sessionBw !== null,
     });
 
     if (lastErr) {
-      onError(`Uploaded ${succeeded}/${batch.length} — “${lastErr}” failed.`);
+      onError(`Uploaded ${created.length}/${batch.length} — “${lastErr}” failed.`);
     }
     setBatch([]);
     if (fileRef.current) fileRef.current.value = '';
-    onSaved();
+    onSaved?.(stamped, takenAt);
   }
 
   const hasPhotos = batch.length > 0;
@@ -212,6 +231,22 @@ export default function PhysiqueUploadFlow({
           </label>
         </div>
       </div>
+
+      {/* Optional album title */}
+      {hasPhotos && (
+        <div className="mt-4">
+          <label className="mb-1 block text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+            Album title (optional)
+          </label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Summer Bulk, Cut Phase 2…"
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+          />
+        </div>
+      )}
 
       {/* Photo chips */}
       {hasPhotos && (
@@ -308,13 +343,14 @@ export default function PhysiqueUploadFlow({
         >
           {uploading
             ? 'Uploading…'
-            : `Save progress · ${batch.length} photo${batch.length === 1 ? '' : 's'}`}
+            : `Save session · ${batch.length} photo${batch.length === 1 ? '' : 's'}`}
         </button>
       </div>
     </div>
   );
 }
 
+/** Local-timezone YYYY-MM-DD. */
 function todayISO(): string {
   const d = new Date();
   return [

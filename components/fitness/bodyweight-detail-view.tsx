@@ -18,6 +18,7 @@ import {
   type HydratedPhoto,
 } from '@/lib/fitness/physique';
 import PhysiqueGallery from '@/components/fitness/physique-gallery';
+import PhysiqueUploadFlow from '@/components/fitness/physique-upload-flow';
 import type { WeightEntry, WeightTarget } from '@/lib/fitness/types';
 import {
   fmtKg,
@@ -77,6 +78,10 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
 
   // Full physique gallery — the pre-remake album library.
   const [galleryOpen, setGalleryOpen] = useState(false);
+
+  // Add Session — the pre-remake session-first upload flow, restored
+  // after the fitness page reshuffle moved it out of this surface.
+  const [addSessionOpen, setAddSessionOpen] = useState(false);
 
   // Full photo list backing the gallery (fetched without a limit).
   const [photos, setPhotos] = useState<HydratedPhoto[]>([]);
@@ -280,7 +285,7 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
             <div className="mt-0.5 text-[11px] text-zinc-500">
               {snapshot
                 ? `${snapshot.pose_type ?? 'Photo'} · ${snapshot.taken_at}`
-                : 'Add one from the Overview, then browse it here.'}
+                : 'Use + Add Session below to add your first photos.'}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
@@ -289,6 +294,13 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
                 className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
               >
                 Open Gallery
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddSessionOpen((s) => !s)}
+                className="rounded-md bg-rose-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-rose-500"
+              >
+                {addSessionOpen ? 'Cancel' : '+ Add Session'}
               </button>
               <button
                 type="button"
@@ -492,6 +504,23 @@ export default function BodyweightDetailView({ userId }: { userId: string }) {
           </button>
         </div>
       </section>
+
+      {/* ── Add Session (restored pre-remake upload flow) ───────── */}
+      {addSessionOpen && (
+        <div className="mb-6">
+          <PhysiqueUploadFlow
+            userId={userId}
+            onError={(msg) => {
+              console.warn('[bodyweight] add session:', msg);
+            }}
+            onCancel={() => setAddSessionOpen(false)}
+            onSaved={() => {
+              setAddSessionOpen(false);
+              refreshSnapshot();
+            }}
+          />
+        </div>
+      )}
 
       {/* ── Physique gallery modal (pre-remake album library) ───── */}
       {galleryOpen && (

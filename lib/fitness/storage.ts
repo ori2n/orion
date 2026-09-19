@@ -16,6 +16,67 @@ const BUCKET = 'physique-photos';
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 7; // 604800
 
 /**
+ * Session-scoped cache of minted signed URLs, keyed by storage path.
+ *
+ * Why: every gallery/timeline mount used to re-mint URLs for the whole
+ * library. Each mint produces a URL with a NEW token, so the browser
+ * treated it as a different resource and re-downloaded the image bytes
+ * even though the underlying object was in the HTTP cache. On mobile
+ * that meant re-downloading every photo on every gallery open.
+ *
+ * Reusing one URL per path (across mounts within the page session)
+ * lets the browser serve repeat loads from the disk cache, and keeps
+ * `createSignedUrls` batch calls to once per path per session.
+ *
+ * Entries expire at 80% of the TTL so a URL cached near mint time is
+ * never handed out within hours of its own expiry (the signed URL is
+ * still valid ~33 h after a cache hit, and the browser cache carries
+ * the image bytes regardless).
+ */
+const signedUrlCache = new Map<
+  string,
+  { url: string; expiresAtMs: number }
+>();
+
+function cacheExpiryMs(ttlSeconds: number): number {
+  return Date.now() + Math.floor(ttlSeconds * 1000 * 0.8);
+}
+
+/** Drop expired cache entries (cheap — runs at most once per mint). */
+function pruneSignedUrlCache(): void {
+  const now = Date.now();
+  for (const [path, entry] of signedUrlCache) {
+    if (entry.expiresAtMs <= now) signedUrlCache.delete(path);
+  }
+}
+
+async function mintSignedUrls(
+  paths: string[],
+  expiresInSec: number,
+): Promise<Map<string, string | null>> {
+  if (paths.length === 0) return new Map();
+  try {
+    const { data, error } = await supabase.storage
+      .from(BUCKET)
+      .createSignedUrls(paths, expiresInSec);
+    if (error) {
+      console.warn('[fitness] signedPhysiquePhotoUrls error:', error.message);
+      return new Map();
+    }
+    const byPath = new Map<string, string | null>();
+    for (const item of data ?? []) {
+      if (item.path) {
+        byPath.set(item.path, item.error ? null : (item.signedUrl ?? null));
+      }
+    }
+    return byPath;
+  } catch (err) {
+    console.warn('[fitness] signedPhysiquePhotoUrls exception:', err);
+    return new Map();
+  }
+}
+
+/**
  * Uploads come straight off a phone camera / screenshots: 12MP JPEGs
  * and 7.5 MB PNGs. A mobile browser can be slow to download those and
  * can even fail to decode them. Downscale client-side before upload so
@@ -132,19 +193,19 @@ export async function signedPhysiquePhotoUrl(
   path: string,
   expiresInSec = SIGNED_URL_TTL_SECONDS,
 ): Promise<string | null> {
-  try {
-    const { data, error } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(path, expiresInSec);
-    if (error) {
-      console.warn('[fitness] signedPhysiquePhotoUrl error:', error.message);
-      return null;
-    }
-    return data?.signedUrl ?? null;
-  } catch (err) {
-    console.warn('[fitness] signedPhysiquePhotoUrl exception:', err);
-    return null;
+  pruneSignedUrlCache();
+  const cached = signedUrlCache.get(path);
+  if (cached && cached.expiresAtMs > Date.now()) return cached.url;
+  const url = await mintSignedUrls([path], expiresInSec).then(
+    (m) => m.get(path) ?? null,
+  );
+  if (url) {
+    signedUrlCache.set(path, {
+      url,
+      expiresAtMs: cacheExpiryMs(expiresInSec),
+    });
   }
+  return url;
 }
 
 /**
@@ -158,25 +219,32 @@ export async function signedPhysiquePhotoUrls(
   expiresInSec = SIGNED_URL_TTL_SECONDS,
 ): Promise<Map<string, string | null>> {
   if (paths.length === 0) return new Map();
-  try {
-    const { data, error } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrls(paths, expiresInSec);
-    if (error) {
-      console.warn('[fitness] signedPhysiquePhotoUrls error:', error.message);
-      return new Map();
+  pruneSignedUrlCache();
+
+  // Serve every still-valid URL from cache; mint only the misses in
+  // one batched `createSignedUrls` call.
+  const byPath = new Map<string, string | null>();
+  const misses: string[] = [];
+  for (const path of paths) {
+    const cached = signedUrlCache.get(path);
+    if (cached && cached.expiresAtMs > Date.now()) {
+      byPath.set(path, cached.url);
+    } else {
+      misses.push(path);
     }
-    const byPath = new Map<string, string | null>();
-    for (const item of data ?? []) {
-      if (item.path) {
-        byPath.set(item.path, item.error ? null : (item.signedUrl ?? null));
-      }
-    }
-    return byPath;
-  } catch (err) {
-    console.warn('[fitness] signedPhysiquePhotoUrls exception:', err);
-    return new Map();
   }
+  if (misses.length === 0) return byPath;
+
+  const minted = await mintSignedUrls(misses, expiresInSec);
+  const expiresAtMs = cacheExpiryMs(expiresInSec);
+  for (const path of misses) {
+    const url = minted.get(path) ?? null;
+    if (url) {
+      signedUrlCache.set(path, { url, expiresAtMs });
+    }
+    byPath.set(path, url);
+  }
+  return byPath;
 }
 
 /** Delete one photo object. */

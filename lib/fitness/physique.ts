@@ -663,6 +663,24 @@ export function applyDeletePhoto(
 }
 
 /**
+ * Optimistically splice freshly-created session rows into the
+ * gallery's photo list. Rows may belong to a brand-new date (a new
+ * album appears in the grid, cover = first uploaded photo) or to an
+ * existing one (extra photos join that album). Dedupes by id so a
+ * retried save can never double-render a tile.
+ */
+export function applyNewSession(
+  photos: HydratedPhoto[],
+  created: HydratedPhoto[],
+): HydratedPhoto[] {
+  if (created.length === 0) return photos;
+  const known = new Set(photos.map((p) => p.id));
+  const fresh = created.filter((p) => !known.has(p.id));
+  if (fresh.length === 0) return photos;
+  return [...photos, ...fresh];
+}
+
+/**
  * Dashboard hero pick rule:
  *
  *   1. Latest starred `front` pose.
