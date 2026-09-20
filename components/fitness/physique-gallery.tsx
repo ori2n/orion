@@ -31,6 +31,24 @@ type Filter = 'all' | 'starred';
 type Mode = 'library' | 'album';
 
 /**
+ * Height of the app's sticky header, as a CSS calc operand:
+ * `AppHeader` is `h-11` (44px) plus `env(safe-area-inset-top)`.
+ *
+ * Why the gallery needs it: every page under the Fitness layout is
+ * rendered inside `<main class="relative z-10">`, which traps this
+ * modal (and each of its full-screen layers) in that stacking
+ * context — so the header's `z-40` always paints ABOVE us, no matter
+ * how high our own z-index goes. Reserving the header's band at the
+ * top of each layer is therefore the only way to keep a control (the
+ * red X in particular) out from under the nav bar.
+ */
+const HEADER_OFFSET = 'env(safe-area-inset-top, 0px) + 44px';
+/** Padding that pushes a layer's content below the app header. */
+const BELOW_HEADER_PADDING = `calc(${HEADER_OFFSET})`;
+/** Position for a control pinned just under the app header. */
+const BELOW_HEADER_INSET = `calc(${HEADER_OFFSET} + 0.75rem)`;
+
+/**
  * Selector for the before/after comparison queue. Sessions and
  * photos are *both* eligible — when Compare is pressed, sessions
  * auto-resolve to a representative photo via
@@ -57,6 +75,20 @@ function sameSelection(a: Selection, b: Selection): boolean {
 }
 
 /**
+ * True when a history entry is the gallery's own Back guard (see the
+ * `armHistoryGuard` block inside the component). Reads defensively
+ * because the entry may carry Next's router state, be `null`, or be a
+ * state pushed by unrelated code.
+ */
+function isGuardState(state: unknown): boolean {
+  return Boolean(
+    state &&
+      typeof state === 'object' &&
+      (state as { physiqueGallery?: boolean }).physiqueGallery,
+  );
+}
+
+/**
  * PhysiqueGallery — Spotify-style album library.
  *
  * UX (per user spec):
@@ -75,9 +107,14 @@ function sameSelection(a: Selection, b: Selection): boolean {
  *     views; sessions can be pinned from the library, individual
  *     photos from the album.
  *
- * The dashboard's "Quick comparison" button still seeds the
- * compare queue via `initialSelection: string[]` and activates
- * `comparing` directly (skipping library view).
+ * The dashboard's "Quick comparison" button still seeds the compare
+ * board via `initialSelection: string[]`; with `initialComparing` the
+ * gallery opens straight into Compare mode with both slots already
+ * filled (the pair is still swappable from the picker).
+ *
+ * Compare mode itself is a *view inside the gallery*: it shows two
+ * slots plus the gallery photos grouped by session, and only renders
+ * the side-by-side comparison once the user has chosen both photos.
  */
 export default function PhysiqueGallery({
   photos,
@@ -126,7 +163,16 @@ export default function PhysiqueGallery({
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Selection[]>([]);
-  const [comparing, setComparing] = useState<boolean>(false);
+  /**
+   * Compare view — a dedicated in-gallery mode, NOT an instant
+   * comparison against a predetermined photo. Opening it never
+   * compares anything by itself: the user lands on the two-slot
+   * picker, browses the gallery/session photos, and the side-by-side
+   * view appears as soon as both slots are filled. `selected` doubles
+   * as the compare board, so pins made in the library or a session
+   * grid carry straight into Compare mode.
+   */
+  const [compareOpen, setCompareOpen] = useState<boolean>(false);
   const [viewer, setViewer] = useState<HydratedPhoto | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyDate, setBusyDate] = useState<string | null>(null);
@@ -139,12 +185,90 @@ export default function PhysiqueGallery({
    */
   const [addSessionOpen, setAddSessionOpen] = useState(false);
 
+  // ── Browser / mobile Back integration ───────────────────────────
+  //
+  // While the gallery is open it keeps exactly ONE guard entry in the
+  // history stack. Pressing Back (browser button, Android back
+  // gesture) peels the innermost open layer — photo viewer → compare
+  // → cover picker → add-session → session → gallery — instead of
+  // throwing the user out of the route and losing the gallery state.
+  // Every peel re-arms the guard, so the next Back continues from
+  // where the user stopped. The final Back (library layer) closes the
+  // modal, consumes the guard entry, and leaves the history exactly
+  // as it was before the gallery was opened — no dead entries, no URL
+  // churn, no new route.
+  //
+  // `closeTopLayerRef` / `requestCloseRef` hold the newest closures so
+  // the mount-once popstate listener never reads stale state.
+  const closeTopLayerRef = useRef<() => boolean>(() => false);
+  const requestCloseRef = useRef<() => void>(() => {});
+  const suppressPopRef = useRef(0);
+  const guardAliveRef = useRef(false);
+
+  /** Mark the current history entry as ours (idempotent). */
+  function armHistoryGuard() {
+    if (typeof window === 'undefined') return;
+    if (!guardAliveRef.current && !isGuardState(window.history.state)) {
+      // Spread the existing state so Next's own router internals on this
+      // entry survive; we only add our marker on top.
+      window.history.pushState(
+        { ...((window.history.state as object | null) ?? {}), physiqueGallery: true },
+        '',
+      );
+    }
+    guardAliveRef.current = true;
+  }
+
+  useEffect(() => {
+    armHistoryGuard();
+
+    function onPop() {
+      // Our own `history.back()` (dropping the guard on an in-app close)
+      // — nothing to peel.
+      if (suppressPopRef.current > 0) {
+        suppressPopRef.current -= 1;
+        return;
+      }
+      if (closeTopLayerRef.current()) {
+        // A layer was closed — re-arm so the next Back peels the next one.
+        guardAliveRef.current = false;
+        armHistoryGuard();
+        return;
+      }
+      // Library layer: the guard entry is consumed, so the modal closes
+      // without touching history again.
+      guardAliveRef.current = false;
+      requestCloseRef.current();
+    }
+
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  /**
+   * Close the whole gallery. Drops our guard entry first (so the user
+   * does not have to press Back an extra time afterwards) and then lets
+   * the parent unmount us.
+   */
+  function requestClose() {
+    if (
+      guardAliveRef.current &&
+      typeof window !== 'undefined' &&
+      isGuardState(window.history.state)
+    ) {
+      suppressPopRef.current += 1;
+      guardAliveRef.current = false;
+      window.history.back();
+    }
+    onClose();
+  }
+
   // Seeded once on mount by the dashboard's Quick-compare button.
   useEffect(() => {
     if (initialSelection && initialSelection.length > 0) {
       setSelected(initialSelection.map((id) => ({ kind: 'photo', id })));
       if (initialComparing && initialSelection.length === 2) {
-        setComparing(true);
+        setCompareOpen(true);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,21 +295,18 @@ export default function PhysiqueGallery({
     }
   }, [sessions, currentSession]);
 
-  // Escape: close modal → exit add-session flow → exit compare → close
-  // cover-pick → close viewer → exit album (in order).
+  // Escape mirrors Back exactly: peel the innermost open layer (viewer →
+  // add-session → compare → cover-pick → session) and only close the
+  // whole gallery once the library layer is on screen.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
-      if (viewer) setViewer(null);
-      else if (addSessionOpen) setAddSessionOpen(false);
-      else if (comparing) setComparing(false);
-      else if (coverPickOpen) setCoverPickOpen(false);
-      else if (mode === 'album') setMode('library');
-      else onClose();
+      if (closeTopLayerRef.current()) return;
+      requestCloseRef.current();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, viewer, comparing, coverPickOpen, mode, addSessionOpen]);
+  }, []);
 
   const filteredSessions = useMemo(() => {
     let result = sessions;
@@ -232,38 +353,70 @@ export default function PhysiqueGallery({
     setSelected([]);
   }
 
-  function resolvePair(): [HydratedPhoto, HydratedPhoto] | null {
-    if (selected.length !== 2) return null;
-    const lookup = (sel: Selection): HydratedPhoto | null => {
+  /**
+   * Compare-picker fill rule: the first tap fills slot 1, the second
+   * fills slot 2, and every later tap *replaces slot 2* — so the photo
+   * the user anchored in slot 1 stays put while they hunt for the photo
+   * to compare it against. Tapping something already on the board
+   * takes it back off.
+   */
+  function pickForCompare(sel: Selection) {
+    setSelected((prev) => {
+      if (prev.some((s) => sameSelection(s, sel))) {
+        return prev.filter((s) => !sameSelection(s, sel));
+      }
+      if (prev.length === 0) return [sel];
+      return [prev[0], sel];
+    });
+  }
+
+  /** Empty one compare slot (0 = the first photo, 1 = the second). */
+  function clearSlot(index: number) {
+    setSelected((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  /** Resolve any compare-board entry to the photo it stands for. */
+  const resolveSelection = useCallback(
+    (sel: Selection): HydratedPhoto | null => {
       if (sel.kind === 'photo') return photoLookup.get(sel.id) ?? null;
       const session = sessions.find((s) => s.taken_at === sel.taken_at);
       if (!session) return null;
       return resolveSessionRepresentative(session.photos);
-    };
-    const a = lookup(selected[0]);
-    const b = lookup(selected[1]);
+    },
+    [photoLookup, sessions],
+  );
+
+  function resolvePair(): [HydratedPhoto, HydratedPhoto] | null {
+    if (selected.length !== 2) return null;
+    const a = resolveSelection(selected[0]);
+    const b = resolveSelection(selected[1]);
     if (!a || !b) return null;
     return [a, b];
   }
 
-  function openComparison() {
-    if (selected.length !== 2) return;
-    const pair = resolvePair();
-    if (!pair) return;
-    setComparing(true);
+  /**
+   * Open Compare mode. This never compares against a predetermined
+   * photo: with fewer than two entries on the board it lands on the
+   * two-slot picker so the user can browse the gallery and choose both
+   * photos themselves.
+   */
+  function openCompare() {
+    setCompareOpen(true);
+    if (selected.length === 0) return;
+    const first = selected[0];
+    const second = selected[1];
     void logEvent(EventTypes.COMPARISON_VIEWED, {
-      a_kind: selected[0].kind,
-      a_id:
-        selected[0].kind === 'photo'
-          ? selected[0].id
-          : selected[0].taken_at,
-      b_kind: selected[1].kind,
+      a_kind: first.kind,
+      a_id: first.kind === 'photo' ? first.id : first.taken_at,
+      b_kind: second?.kind ?? null,
       b_id:
-        selected[1].kind === 'photo'
-          ? selected[1].id
-          : selected[1].taken_at,
-      auto_resolved_session:
-        selected[0].kind === 'session' || selected[1].kind === 'session',
+        second === undefined
+          ? null
+          : second.kind === 'photo'
+            ? second.id
+            : second.taken_at,
+      auto_resolved_session: selected.some((s) => s.kind === 'session'),
+      slots_filled: selected.length,
     });
   }
 
@@ -434,6 +587,46 @@ export default function PhysiqueGallery({
   }
 
   /**
+   * Peel the innermost open layer, in the same order for the Escape key
+   * and the browser/Android Back button: photo viewer → add-session
+   * flow → compare view → cover picker → session view. Returns false
+   * when only the library is left, which tells the caller to close the
+   * whole gallery.
+   */
+  function closeTopLayer(): boolean {
+    if (viewer) {
+      setViewer(null);
+      return true;
+    }
+    if (addSessionOpen) {
+      setAddSessionOpen(false);
+      return true;
+    }
+    if (compareOpen) {
+      setCompareOpen(false);
+      return true;
+    }
+    if (coverPickOpen) {
+      setCoverPickOpen(false);
+      setCoverFailure(null);
+      return true;
+    }
+    if (mode === 'album') {
+      closeAlbum();
+      return true;
+    }
+    return false;
+  }
+
+  // Hand the mount-once Escape/popstate listeners the freshest closures.
+  // (Assigning these refs during render is not allowed — React forbids
+  // ref writes in the render phase.)
+  useEffect(() => {
+    closeTopLayerRef.current = closeTopLayer;
+    requestCloseRef.current = requestClose;
+  });
+
+  /**
    * A new session (or extra photos appended to an existing one) was
    * created by the inline upload flow. Optimistically splice the
    * hydrated rows into the gallery's photo list, then bubble to the
@@ -467,6 +660,10 @@ export default function PhysiqueGallery({
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col"
+      // Reserve the sticky app header's band (see HEADER_OFFSET) so the
+      // gallery's own header row — and its red X — never hide underneath
+      // the nav bar.
+      style={{ paddingTop: BELOW_HEADER_PADDING }}
       role="dialog"
       aria-modal="true"
       aria-label={
@@ -477,7 +674,7 @@ export default function PhysiqueGallery({
     >
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={requestClose}
         aria-hidden
       />
 
@@ -489,12 +686,17 @@ export default function PhysiqueGallery({
         }}
       />
 
-      {comparing ? (
-        <CompareOverlay
-          pair={resolvePair()}
+      {compareOpen ? (
+        <CompareView
+          sessions={sessions}
           selected={selected}
+          resolveSelection={resolveSelection}
+          onPick={pickForCompare}
+          onClearSlot={clearSlot}
+          onClearAll={clearSelection}
+          pair={resolvePair()}
           onFlip={() => setSelected((s) => [...s].reverse())}
-          onBack={() => setComparing(false)}
+          onClose={() => setCompareOpen(false)}
         />
       ) : addSessionOpen ? (
         /* Session-first add flow — replaces the library grid while
@@ -548,10 +750,9 @@ export default function PhysiqueGallery({
           isSelectedShot={isSelectedShot}
           toggleSelected={toggleSelected}
           clearSelection={clearSelection}
-          canCompare={selected.length === 2}
-          onCompare={openComparison}
+          onCompare={openCompare}
           onOpenAlbum={openAlbum}
-          onClose={onClose}
+          onClose={requestClose}
           onAddSession={() => setAddSessionOpen(true)}
         />
       ) : currentSession ? (
@@ -559,6 +760,7 @@ export default function PhysiqueGallery({
           session={currentSession}
           busy={busyDate === currentSession.taken_at}
           onBack={closeAlbum}
+          onCompare={openCompare}
           onChange={onChange}
           onOpenPhoto={setViewer}
           onStarPhoto={handleStar}
@@ -643,7 +845,6 @@ function LibraryView({
   isSelectedShot,
   toggleSelected,
   clearSelection,
-  canCompare,
   onCompare,
   onOpenAlbum,
   onClose,
@@ -660,7 +861,6 @@ function LibraryView({
   isSelectedShot: (entry: Selection) => boolean;
   toggleSelected: (entry: Selection) => void;
   clearSelection: () => void;
-  canCompare: boolean;
   onCompare: () => void;
   onOpenAlbum: (s: PhysiqueSession) => void;
   onClose: () => void;
@@ -733,25 +933,24 @@ function LibraryView({
               Clear ({selected.length})
             </button>
           )}
-          {canCompare ? (
-            /* Compact, icon-first compare trigger. The two-photos +
-               arrows glyph reads as "comparison" on mobile where a
-               bare text button (or a bare X) does not. */
-            <button
-              onClick={onCompare}
-              className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
-              aria-label="Compare the two selected photos"
-            >
-              <CompareIcon />
-              Compare
-            </button>
-          ) : (
-            <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">
-              {selected.length === 0
-                ? 'Pick 2 to compare'
-                : `Selected ${selected.length}/2`}
-            </span>
-          )}
+          <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+            {selected.length === 0
+              ? 'Pick photos to compare'
+              : selected.length === 1
+                ? 'Selected 1/2'
+                : 'Ready to compare'}
+          </span>
+          {/* Compare is always reachable: it opens the dedicated compare
+              view, which starts on the two-slot picker whenever fewer
+              than two photos are on the board. */}
+          <button
+            onClick={onCompare}
+            className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
+            aria-label="Open the compare view"
+          >
+            <CompareIcon />
+            Compare
+          </button>
         </div>
       </div>
 
@@ -880,6 +1079,7 @@ function AlbumView({
   session,
   busy,
   onBack,
+  onCompare,
   onChange,
   onOpenPhoto,
   onStarPhoto,
@@ -898,6 +1098,8 @@ function AlbumView({
   session: PhysiqueSession;
   busy: boolean;
   onBack: () => void;
+  /** Open the compare view (session photos stay on screen behind it). */
+  onCompare: () => void;
   onChange?: () => void;
   onOpenPhoto: (p: HydratedPhoto) => void;
   onStarPhoto: (p: HydratedPhoto) => void;
@@ -1009,13 +1211,15 @@ function AlbumView({
             (library view), never all the way out of the modal. */}
         <button
           onClick={onBack}
-          className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 py-1.5 pl-2.5 pr-3.5 text-xs font-semibold text-zinc-100 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+          className="flex h-9 shrink-0 items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-semibold text-zinc-100 transition-colors hover:border-zinc-600 hover:bg-zinc-800 sm:h-auto sm:py-1.5 sm:pl-2.5 sm:pr-3.5"
           aria-label="Back to the gallery grid"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
-          Back to gallery
+          {/* Label only where there is room — the icon keeps the mobile
+              header from crowding out the red X. */}
+          <span className="hidden sm:inline">Back to gallery</span>
         </button>
         <div className="flex items-center gap-1.5">
           <button
@@ -1028,8 +1232,17 @@ function AlbumView({
                 : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
             }`}
             title="Pin this album for compare"
+            aria-label={
+              sessionSelSelected
+                ? 'Remove this album from the compare board'
+                : 'Pin this album for compare'
+            }
+            aria-pressed={sessionSelSelected}
           >
-            {sessionSelSelected ? '✓ Pinned' : 'Pin for compare'}
+            <span className="hidden sm:inline">
+              {sessionSelSelected ? '✓ Pinned' : 'Pin for compare'}
+            </span>
+            <span className="sm:hidden">{sessionSelSelected ? '✓' : 'Pin'}</span>
           </button>
           <button
             onClick={onFavourite}
@@ -1050,6 +1263,21 @@ function AlbumView({
           >
             Delete
           </button>
+          <button
+            onClick={onCompare}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800 sm:px-3"
+            aria-label="Open the compare view"
+            title="Compare photos across sessions"
+          >
+            <CompareIcon size={14} />
+            <span className="hidden sm:inline">Compare</span>
+          </button>
+          {/* Always-visible red X — top-right corner of the session display.
+              Returns to the gallery grid (never out of the modal). */}
+          <CloseX
+            onClick={onBack}
+            label="Close session and return to the gallery"
+          />
         </div>
       </header>
 
@@ -1420,6 +1648,9 @@ function CoverPickOverlay({
   return (
     <div
       className="fixed inset-0 z-30 flex flex-col bg-zinc-950/95 backdrop-blur"
+      // Same header band as the gallery shell — the Cancel button lives
+      // in this overlay's own header row.
+      style={{ paddingTop: BELOW_HEADER_PADDING }}
       role="dialog"
       aria-modal="true"
       aria-label="Pick album cover"
@@ -1546,72 +1777,384 @@ function CoverPickOverlay({
   );
 }
 
-// ─── Compare overlay (unchanged) ──────────────────────────────
+// ─── Compare view (in-gallery mode, not a page) ────────────────
 
-function CompareOverlay({
-  pair,
-  selected,
-  onFlip,
-  onBack,
+/**
+ * The single "get me out of here" affordance used by the session
+ * view, the photo viewer and the compare view: a filled red X pinned
+ * to the top-right corner. `size="lg"` bumps the hit area to 44 px so
+ * it stays an easy thumb target on mobile, where a bare glyph would
+ * not be.
+ */
+function CloseX({
+  onClick,
+  label,
+  size = 'md',
+  className = '',
+  style,
 }: {
-  pair: [HydratedPhoto, HydratedPhoto] | null;
-  selected: Selection[];
-  onFlip: () => void;
-  onBack: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  /** Accessible name — also spells out where the user lands. */
+  label: string;
+  size?: 'md' | 'lg';
+  className?: string;
+  /** Escape hatch for absolute positioning inside a full-screen layer. */
+  style?: React.CSSProperties;
 }) {
+  const dims = size === 'lg' ? 'h-11 w-11' : 'h-9 w-9';
+  const icon = size === 'lg' ? 20 : 18;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      style={style}
+      className={`flex shrink-0 items-center justify-center rounded-lg bg-red-600 text-white shadow-lg shadow-red-950/40 transition-colors hover:bg-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 active:scale-95 ${dims} ${className}`}
+    >
+      <svg
+        width={icon}
+        height={icon}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d="M18 6L6 18" />
+        <path d="M6 6l12 12" />
+      </svg>
+    </button>
+  );
+}
+
+/**
+ * Compare is a *mode inside the gallery*, never a route: it opens over
+ * whatever the user was looking at and closing it reveals that view
+ * again (library or session), so all gallery state survives.
+ *
+ * Layout:
+ *   1. Two explicit slots — "First photo" / "Second photo" — each with
+ *      its own ✕, so either side can be re-picked.
+ *   2. The side-by-side comparison, shown as soon as both slots are
+ *      filled. It reuses `PhysiqueComparison` in its split mode, so
+ *      the existing alignment / zoom / pan tooling keeps working.
+ *   3. A picker that mirrors the library: a session-chip strip (pin a
+ *      whole session, auto-resolved to its best pose) plus one section
+ *      per session with horizontally scrollable thumbnails.
+ *
+ * Fill rule (see `pickForCompare`): first tap → slot 1, second tap →
+ * slot 2, later taps replace slot 2 so slot 1 stays anchored.
+ */
+function CompareView({
+  sessions,
+  selected,
+  resolveSelection,
+  onPick,
+  onClearSlot,
+  onClearAll,
+  pair,
+  onFlip,
+  onClose,
+}: {
+  sessions: PhysiqueSession[];
+  selected: Selection[];
+  resolveSelection: (sel: Selection) => HydratedPhoto | null;
+  onPick: (entry: Selection) => void;
+  onClearSlot: (index: number) => void;
+  onClearAll: () => void;
+  pair: [HydratedPhoto, HydratedPhoto] | null;
+  onFlip: () => void;
+  onClose: () => void;
+}) {
+  const first = selected[0] ?? null;
+  const second = selected[1] ?? null;
+  const firstPhoto = first ? resolveSelection(first) : null;
+  const secondPhoto = second ? resolveSelection(second) : null;
+
+  /** 1-based slot number for a board entry, or null when it is not on
+   *  the board. Drives every "picked" badge in the picker. */
+  function slotNumber(entry: Selection): number | null {
+    if (first && sameSelection(first, entry)) return 1;
+    if (second && sameSelection(second, entry)) return 2;
+    return null;
+  }
+
+  const hint = pair
+    ? 'Tap another photo below to swap the second one — slot 1 stays put.'
+    : firstPhoto
+      ? 'Now pick the photo you want to compare it against.'
+      : 'Pick a photo below, then a second one to compare against.';
+  const hasPhotos = sessions.length > 0;
+
   return (
     <div className="relative z-20 flex h-full w-full flex-col bg-zinc-950">
-      <header className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-5 py-3">
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.15em] text-rose-400/80">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3 sm:px-6">
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-rose-400/80">
             Compare
           </div>
-          <h2 className="mt-0.5 text-base font-semibold text-zinc-100">
-            {pair ? `${pair[0].taken_at} → ${pair[1].taken_at}` : 'No selection'}
+          <h2 className="mt-0.5 truncate text-lg font-bold tracking-tight text-zinc-100">
+            {pair
+              ? `${formatAlbumDate(pair[0].taken_at)} → ${formatAlbumDate(pair[1].taken_at)}`
+              : 'Pick two photos'}
           </h2>
-          <div className="mt-1 hidden text-[10px] text-zinc-500 sm:block">
-            {selected
-              .map((s) =>
-                s.kind === 'session'
-                  ? `session ${s.taken_at}`
-                  : `photo ${s.id.slice(0, 8)}`,
-              )
-              .join(' vs ')}
-          </div>
+          <p className="mt-0.5 text-[11px] text-zinc-500">{hint}</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onFlip}
-            disabled={!pair}
-            className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            Flip
-          </button>
-          <button
-            onClick={onBack}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-            aria-label="Back to library"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+        <div className="flex shrink-0 items-center gap-2">
+          {selected.length > 0 && (
+            <button
+              onClick={onClearAll}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:bg-zinc-800"
             >
-              <path d="M18 6L6 18" />
-              <path d="M6 6l12 12" />
-            </svg>
-          </button>
+              Reset
+            </button>
+          )}
+          <CloseX
+            onClick={onClose}
+            label="Close compare and return to the gallery"
+          />
         </div>
       </header>
-      <div className="flex flex-1 items-center justify-center p-4 sm:p-6">
-        {pair ? <PhysiqueComparison before={pair[0]} after={pair[1]} /> : null}
+
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-5xl space-y-5 p-4 sm:p-6">
+          {/* The two slots the user is filling. */}
+          <div className="grid grid-cols-2 gap-3">
+            <CompareSlot
+              index={0}
+              photo={firstPhoto}
+              selection={first}
+              onClear={() => onClearSlot(0)}
+            />
+            <CompareSlot
+              index={1}
+              photo={secondPhoto}
+              selection={second}
+              onClear={() => onClearSlot(1)}
+            />
+          </div>
+
+          {/* Side-by-side, once both slots are filled. */}
+          {pair ? (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+                  Side by side
+                </h3>
+                <button
+                  onClick={onFlip}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-300 hover:bg-zinc-800"
+                >
+                  ⇄ Flip order
+                </button>
+              </div>
+              <PhysiqueComparison
+                key={`${pair[0].id}:${pair[1].id}`}
+                before={pair[0]}
+                after={pair[1]}
+                initialMode="split"
+              />
+            </section>
+          ) : (
+            <p className="rounded-xl border border-dashed border-zinc-800 px-4 py-6 text-center text-xs text-zinc-500">
+              {!hasPhotos
+                ? 'No photos yet — add a session from the gallery first.'
+                : firstPhoto
+                  ? 'Pick a second photo — the side-by-side view appears here.'
+                  : 'Pick your first photo from the gallery below.'}
+            </p>
+          )}
+
+          {/* Whole-session shortcuts (auto-resolved to the best pose). */}
+          {sessions.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+                Compare whole sessions (best pose)
+              </h3>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {sessions.map((s) => {
+                  const entry: Selection = {
+                    kind: 'session',
+                    taken_at: s.taken_at,
+                  };
+                  const num = slotNumber(entry);
+                  return (
+                    <button
+                      key={s.taken_at}
+                      type="button"
+                      onClick={() => onPick(entry)}
+                      aria-pressed={Boolean(num)}
+                      className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                        num
+                          ? 'border-rose-500 bg-rose-600 text-white'
+                          : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+                      }`}
+                    >
+                      <SlotBadge number={num} />
+                      {s.title || formatAlbumDate(s.taken_at)}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Every gallery photo, grouped exactly like the library. */}
+          <section>
+            <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+              {hasPhotos ? 'Pick a photo from your gallery' : 'Your gallery is empty'}
+            </h3>
+            <div className="space-y-4">
+              {sessions.map((s) => {
+                const sessionNum = slotNumber({
+                  kind: 'session',
+                  taken_at: s.taken_at,
+                });
+                return (
+                  <div
+                    key={s.taken_at}
+                    className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-3"
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <div className="truncate text-xs font-semibold text-zinc-200">
+                        {s.title || formatAlbumDate(s.taken_at)}
+                      </div>
+                      <span className="shrink-0 text-[10px] text-zinc-500">
+                        {sessionNum
+                          ? `Session in slot ${sessionNum}`
+                          : `${s.count} photo${s.count === 1 ? '' : 's'}`}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                      {s.photos.map((p) => {
+                        const entry: Selection = { kind: 'photo', id: p.id };
+                        const num = slotNumber(entry);
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => onPick(entry)}
+                            aria-pressed={Boolean(num)}
+                            aria-label={
+                              num
+                                ? `Remove ${p.pose_type ?? 'photo'} from slot ${num}`
+                                : `Add ${p.pose_type ?? 'photo'} ${p.taken_at} to compare`
+                            }
+                            className={`relative h-24 w-20 shrink-0 overflow-hidden rounded-lg border-2 transition-all sm:h-28 sm:w-24 ${
+                              num
+                                ? 'border-rose-500 ring-2 ring-rose-500/40'
+                                : 'border-zinc-800 hover:border-zinc-600'
+                            }`}
+                          >
+                            {p.url ? (
+                              <GalleryImage
+                                src={p.url}
+                                alt={`${p.pose_type ?? 'Photo'} ${p.taken_at}`}
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              <span className="flex h-full w-full items-center justify-center text-[10px] text-zinc-600">
+                                …
+                              </span>
+                            )}
+                            <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/85 to-transparent px-1.5 py-1 text-[9px] font-medium uppercase tracking-wider text-white/95">
+                              {p.pose_type ?? 'Photo'}
+                            </span>
+                            {num && (
+                              <span className="absolute left-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-bold text-white shadow">
+                                {num}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * One of the two compare slots. Shows the resolved photo (a whole
+ * session resolves to its representative "best pose") plus a ✕ that
+ * re-opens that slot for picking.
+ */
+function CompareSlot({
+  index,
+  photo,
+  selection,
+  onClear,
+}: {
+  index: number;
+  photo: HydratedPhoto | null;
+  selection: Selection | null;
+  onClear: () => void;
+}) {
+  const label = index === 0 ? 'First photo' : 'Second photo';
+  return (
+    <div
+      className={`relative overflow-hidden rounded-xl border ${
+        photo
+          ? 'border-rose-500/50 bg-zinc-900'
+          : 'border-dashed border-zinc-700 bg-zinc-900/40'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2 px-3 py-2">
+        <span className="truncate text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-400">
+          {label}
+        </span>
+        {photo && (
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label={`Clear the ${label.toLowerCase()}`}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      <div className="relative aspect-[3/4] w-full bg-black/40">
+        {photo?.url ? (
+          <GalleryImage
+            src={photo.url}
+            alt={`${label} — ${photo.taken_at}`}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center text-[10px] text-zinc-500">
+            <CompareIcon size={18} />
+            {index === 0 ? 'Tap a photo below' : 'Then a second one'}
+          </span>
+        )}
+      </div>
+      <div className="truncate px-3 py-2 text-[10px] text-zinc-400">
+        {photo
+          ? `${formatAlbumDate(photo.taken_at)} · ${photo.pose_type ?? 'Photo'}${
+              selection?.kind === 'session' ? ' · session best pose' : ''
+            }`
+          : 'Empty'}
+      </div>
+    </div>
+  );
+}
+
+/** Slot number chip for the picker; falls back to the compare glyph. */
+function SlotBadge({ number }: { number: number | null }) {
+  if (!number) return <CompareIcon size={12} />;
+  return (
+    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white/25 text-[9px] font-bold">
+      {number}
+    </span>
   );
 }
 
@@ -1753,23 +2296,28 @@ function FullScreenViewer({
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/95 p-4"
+      // Fixed layers position against the viewport, not the gallery shell,
+      // so the header band has to be reserved here too — otherwise the
+      // viewer's red X lands under the nav bar. The `+ 1rem` keeps the
+      // original `p-4` breathing room at the top.
+      style={{ paddingTop: `calc(${HEADER_OFFSET} + 1rem)` }}
       role="dialog"
       aria-modal="true"
       onClick={onClose}
     >
-      <button
+      {/* Red X pinned to the top-right of the photo. Closing it returns to
+          the session's thumbnail grid (the album view underneath), not to
+          the main gallery. `size="lg"` keeps it an easy thumb target. */}
+      <CloseX
+        size="lg"
+        className="absolute right-4 z-10"
+        style={{ top: BELOW_HEADER_INSET }}
         onClick={(e) => {
           e.stopPropagation();
           onClose();
         }}
-        className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-lg bg-black/60 text-white hover:bg-black"
-        aria-label="Close viewer"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M18 6L6 18" />
-          <path d="M6 6l12 12" />
-        </svg>
-      </button>
+        label="Close photo and return to the session"
+      />
       <div
         className="flex max-h-full max-w-full flex-col items-center gap-3"
         onClick={(e) => e.stopPropagation()}
