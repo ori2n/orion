@@ -112,7 +112,7 @@ export default function TimeManagementPage() {
 
       <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col overflow-hidden px-2 pb-2 sm:px-3">
         {error && <div className="mb-2 shrink-0 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">{error}<button type="button" onClick={() => setError(null)} className="ml-3 font-medium underline">Dismiss</button></div>}
-        {view === 'calendar' && <div className="min-h-0 min-w-0 flex-1"><CalendarPanel refreshKey={calendarRefreshKey} habits={habits} habitCompletions={todayCompletions} onSidebarSchedule={() => setCalendarRefreshKey((value) => value + 1)} /></div>}
+        {view === 'calendar' && <div className="flex min-h-0 min-w-0 flex-1"><CalendarPanel refreshKey={calendarRefreshKey} habits={habits} habitCompletions={todayCompletions} onSidebarSchedule={() => setCalendarRefreshKey((value) => value + 1)} /></div>}
         {view === 'habits' && <HabitHistoryDashboard habits={habits} userId={userId} error={error} onError={setError} onChanged={() => void loadData()} />}
         {view === 'todos' && <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"><TodoList /></div>}
       </main>
